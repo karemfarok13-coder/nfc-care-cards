@@ -1,0 +1,17 @@
+{
+  "name": "nfc-care-cards",
+  "version": "1.0.0",
+  "description": "Arabic MVP for NFC-powered identification cards for blind users.",
+  "main": "server.js",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --watch --disable-warning=ExperimentalWarning server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^2.2.0"
+  }
+}
