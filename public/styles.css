@@ -15,6 +15,7 @@
   --radius-xl: 30px;
   --radius-lg: 22px;
   --radius-md: 16px;
+  --font-ui: "Manrope", sans-serif;
 }
 
 * {
@@ -22,13 +23,21 @@
 }
 
 html {
+  direction: ltr;
+}
+
+html[dir="rtl"] {
   direction: rtl;
+}
+
+html[lang="ar"] {
+  --font-ui: "Cairo", sans-serif;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  font-family: "Cairo", sans-serif;
+  font-family: var(--font-ui);
   color: var(--text);
   background:
     radial-gradient(circle at top left, rgba(242, 143, 59, 0.16), transparent 28%),
@@ -93,6 +102,14 @@ a {
   gap: 10px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .nav a {
   text-decoration: none;
   padding: 10px 16px;
@@ -100,6 +117,37 @@ a {
   background: rgba(255, 255, 255, 0.76);
   border: 1px solid rgba(255, 255, 255, 0.7);
   box-shadow: 0 8px 28px rgba(18, 48, 65, 0.08);
+}
+
+.lang-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 8px 28px rgba(18, 48, 65, 0.08);
+}
+
+.lang-toggle a {
+  text-decoration: none;
+  padding: 10px 14px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-weight: 700;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.lang-toggle a:hover {
+  background: rgba(14, 124, 123, 0.08);
+  color: var(--text);
+}
+
+.lang-toggle a[aria-current="page"] {
+  background: linear-gradient(135deg, var(--brand) 0%, #14a1a0 100%);
+  color: white;
+  box-shadow: 0 12px 24px rgba(14, 124, 123, 0.2);
 }
 
 .hero {
@@ -342,6 +390,7 @@ label {
 
 input[type="text"],
 input[type="tel"],
+input[type="password"],
 textarea,
 input[type="file"] {
   width: 100%;
@@ -413,7 +462,7 @@ input[type="checkbox"] {
 .responsive-table th,
 .responsive-table td {
   padding: 16px 12px;
-  text-align: right;
+  text-align: start;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
@@ -489,6 +538,11 @@ audio {
   .section-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .responsive-table,

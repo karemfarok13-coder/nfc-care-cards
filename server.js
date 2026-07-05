@@ -36,13 +36,18 @@ const ADMIN_PASSWORD = normalizeText(process.env.ADMIN_PASSWORD);
 const ADMIN_COOKIE_SECRET = normalizeText(process.env.ADMIN_COOKIE_SECRET || randomUUID());
 const ADMIN_SESSION_COOKIE = "nfc_admin_session";
 const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const LANGUAGE_COOKIE = "nfc_lang";
+const LANGUAGE_COOKIE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+const DEFAULT_LANGUAGE = "en";
+const SUPPORTED_LANGUAGES = new Set(["en", "ar"]);
+const FLASH_MESSAGE_KEYS = new Set(["card_created_success", "card_updated_success", "card_deleted_success"]);
 const IS_PRODUCTION = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER) || Boolean(process.env.VERCEL);
 const IS_VERCEL = Boolean(process.env.VERCEL);
 const MAX_AUDIO_FILE_SIZE_MB = Number(process.env.MAX_AUDIO_FILE_SIZE_MB || (IS_VERCEL ? 4 : 15));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  fileFilter: (_req, file, callback) => {
+  fileFilter: (req, file, callback) => {
     const extension = path.extname(file.originalname || "").toLowerCase();
     const isAudio = file.mimetype.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension);
 
@@ -51,7 +56,7 @@ const upload = multer({
       return;
     }
 
-    callback(new Error("يرجى رفع ملف صوتي صالح مثل MP3 أو WAV."));
+    callback(new Error(t(getRequestLanguage(req), "invalid_audio_file")));
   },
   limits: {
     fileSize: MAX_AUDIO_FILE_SIZE_MB * 1024 * 1024
@@ -62,12 +67,15 @@ const app = express();
 
 app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: true }));
+app.use(applyLanguagePreference);
 app.use(applySecurityHeaders);
 app.use(express.static(path.join(ROOT_DIR, "public")));
 app.use("/uploads", express.static(UPLOADS_DIRECTORY, { index: false }));
 app.use("/admin", requireAdminAccess);
 
 app.get("/admin/login", (req, res) => {
+  const lang = getRequestLanguage(req);
+
   if (hasValidAdminSession(req)) {
     res.redirect(safeNextPath(req.query.next));
     return;
@@ -79,14 +87,16 @@ app.get("/admin/login", (req, res) => {
       return;
     }
 
-    res.status(503).send(renderAdminConfigPage());
+    res.status(503).send(renderAdminConfigPage(req));
     return;
   }
 
   res.send(
     renderLayout({
-      title: "تسجيل دخول الإدارة",
+      req,
+      title: t(lang, "admin_login_title"),
       content: renderAdminLoginPage({
+        req,
         nextPath: safeNextPath(req.query.next)
       })
     })
@@ -94,13 +104,15 @@ app.get("/admin/login", (req, res) => {
 });
 
 app.post("/admin/login", (req, res) => {
+  const lang = getRequestLanguage(req);
+
   if (!ADMIN_PASSWORD) {
     if (!IS_PRODUCTION) {
       res.redirect("/admin");
       return;
     }
 
-    res.status(503).send(renderAdminConfigPage());
+    res.status(503).send(renderAdminConfigPage(req));
     return;
   }
 
@@ -116,9 +128,11 @@ app.post("/admin/login", (req, res) => {
 
   res.status(401).send(
     renderLayout({
-      title: "تسجيل دخول الإدارة",
+      req,
+      title: t(lang, "admin_login_title"),
       content: renderAdminLoginPage({
-        errorMessage: "بيانات الدخول غير صحيحة.",
+        req,
+        errorMessage: t(lang, "login_invalid"),
         nextPath
       })
     })
@@ -137,53 +151,52 @@ app.get("/admin/logout", (req, res) => {
 
 app.get("/", async (req, res) => {
   const people = await listPeople();
+  const lang = getRequestLanguage(req);
 
   res.send(
     renderLayout({
-      title: "بطاقات NFC للمكفوفين",
+      req,
+      title: t(lang, "home_title"),
       content: `
         <section class="hero">
           <div class="hero-panel">
-            <span class="hero-kicker">NFC 13.56MHz + صفحة تعريف ذكية</span>
-            <h1>حل عملي يساعد المكفوفين يوصلوا بياناتهم الأساسية بسرعة وأمان.</h1>
-            <p class="lead">
-              الكارت يحمل رابط قصير فقط، وعند لمسه بالموبايل تفتح صفحة فيها الاسم، العنوان، أرقام التواصل،
-              وصف الحالة، وتسجيل صوتي يشرح التشخيص أو التعليمات المهمة.
-            </p>
+            <span class="hero-kicker">${escapeHtml(t(lang, "hero_kicker"))}</span>
+            <h1>${escapeHtml(t(lang, "hero_title"))}</h1>
+            <p class="lead">${escapeHtml(t(lang, "hero_description"))}</p>
             <div class="hero-actions">
-              <a class="button button-primary" href="/admin">فتح لوحة الإدارة</a>
-              <a class="button button-secondary" href="/p/${DEMO_PUBLIC_CODE}">عرض بطاقة تجريبية</a>
+              <a class="button button-primary" href="/admin">${escapeHtml(t(lang, "open_dashboard"))}</a>
+              <a class="button button-secondary" href="/p/${DEMO_PUBLIC_CODE}">${escapeHtml(t(lang, "view_demo_card"))}</a>
             </div>
             <div class="stats">
               <div class="stat">
                 <strong>${people.length}</strong>
-                <span>بطاقات مسجلة حاليًا</span>
+                <span>${escapeHtml(t(lang, "cards_registered_count"))}</span>
               </div>
               <div class="stat">
-                <strong>1 رابط</strong>
-                <span>يُكتب على الكارت بدل تخزين كل البيانات</span>
+                <strong>${escapeHtml(t(lang, "one_link_value"))}</strong>
+                <span>${escapeHtml(t(lang, "one_link_label"))}</span>
               </div>
               <div class="stat">
-                <strong>صوت + نص</strong>
-                <span>لشرح الحالة بشكل أوضح لمن يساعد</span>
+                <strong>${escapeHtml(t(lang, "voice_text_value"))}</strong>
+                <span>${escapeHtml(t(lang, "voice_text_label"))}</span>
               </div>
             </div>
           </div>
 
           <aside class="highlight-panel">
-            <h2>كيف يشتغل المشروع؟</h2>
+            <h2>${escapeHtml(t(lang, "how_it_works_title"))}</h2>
             <div class="stack">
               <div class="mini-card">
-                <strong>1. تسجيل الحالة</strong>
-                <span class="muted">تضيف بيانات الشخص وملف صوتي من لوحة الإدارة.</span>
+                <strong>${escapeHtml(t(lang, "step_1_title"))}</strong>
+                <span class="muted">${escapeHtml(t(lang, "step_1_copy"))}</span>
               </div>
               <div class="mini-card">
-                <strong>2. إنشاء رابط البطاقة</strong>
-                <span class="muted">الموقع ينشئ رابطًا ثابتًا مثل /p/demo-card.</span>
+                <strong>${escapeHtml(t(lang, "step_2_title"))}</strong>
+                <span class="muted">${escapeHtml(t(lang, "step_2_copy"))}</span>
               </div>
               <div class="mini-card">
-                <strong>3. كتابة الرابط على NFC</strong>
-                <span class="muted">يتم تخزين الرابط فقط على الكارت أو على QR كنسخة احتياطية.</span>
+                <strong>${escapeHtml(t(lang, "step_3_title"))}</strong>
+                <span class="muted">${escapeHtml(t(lang, "step_3_copy"))}</span>
               </div>
             </div>
           </aside>
@@ -191,8 +204,8 @@ app.get("/", async (req, res) => {
 
         <section>
           <div class="section-head">
-            <h2>البطاقات الموجودة</h2>
-            <a class="button button-secondary" href="/admin/new">إضافة بطاقة جديدة</a>
+            <h2>${escapeHtml(t(lang, "existing_cards_title"))}</h2>
+            <a class="button button-secondary" href="/admin/new">${escapeHtml(t(lang, "add_new_card"))}</a>
           </div>
           ${
             people.length
@@ -200,8 +213,8 @@ app.get("/", async (req, res) => {
                   .map((person) => renderHomeCard(person, req))
                   .join("")}</div>`
               : `<div class="empty-state">
-                  <h3>لسه مفيش بطاقات مضافة</h3>
-                  <p class="muted">ابدأ بإضافة أول بطاقة من لوحة الإدارة ثم اكتب الرابط على كارت الـ NFC.</p>
+                  <h3>${escapeHtml(t(lang, "no_cards_title"))}</h3>
+                  <p class="muted">${escapeHtml(t(lang, "no_cards_copy"))}</p>
                 </div>`
           }
         </section>
@@ -212,26 +225,28 @@ app.get("/", async (req, res) => {
 
 app.get("/admin", async (req, res) => {
   const people = await listPeople();
-  const success = normalizeText(req.query.success);
+  const lang = getRequestLanguage(req);
+  const success = resolveFlashMessage(req, req.query.success);
 
   res.send(
     renderLayout({
-      title: "لوحة الإدارة",
+      req,
+      title: t(lang, "admin_title"),
       content: `
         <section class="section-head">
           <div>
-            <span class="hero-kicker">لوحة الإدارة</span>
-            <h1 class="page-title">إدارة بطاقات المكفوفين</h1>
-            <p class="muted">أضف الحالات، حدّث البيانات، وارفع التسجيلات الصوتية التي ستظهر في الرابط العام.</p>
+            <span class="hero-kicker">${escapeHtml(t(lang, "admin_kicker"))}</span>
+            <h1 class="page-title">${escapeHtml(t(lang, "admin_heading"))}</h1>
+            <p class="muted">${escapeHtml(t(lang, "admin_description"))}</p>
           </div>
           <div class="button-row">
-            <a class="button button-primary" href="/admin/new">إضافة بطاقة</a>
-            <a class="button button-secondary" href="/">العودة للرئيسية</a>
-            ${renderAdminSessionActions()}
+            <a class="button button-primary" href="/admin/new">${escapeHtml(t(lang, "add_card"))}</a>
+            <a class="button button-secondary" href="/">${escapeHtml(t(lang, "back_home"))}</a>
+            ${renderAdminSessionActions(req)}
           </div>
         </section>
 
-        ${renderLocalAdminWarning()}
+        ${renderLocalAdminWarning(req)}
         ${success ? renderAlert("success", success) : ""}
 
         <section class="table-card">
@@ -241,11 +256,11 @@ app.get("/admin", async (req, res) => {
                 <table class="responsive-table">
                   <thead>
                     <tr>
-                      <th>الاسم</th>
-                      <th>كود البطاقة</th>
-                      <th>التواصل</th>
-                      <th>الرابط العام</th>
-                      <th>التحكم</th>
+                      <th>${escapeHtml(t(lang, "name_column"))}</th>
+                      <th>${escapeHtml(t(lang, "card_code_column"))}</th>
+                      <th>${escapeHtml(t(lang, "contact_column"))}</th>
+                      <th>${escapeHtml(t(lang, "public_link_column"))}</th>
+                      <th>${escapeHtml(t(lang, "actions_column"))}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -255,9 +270,9 @@ app.get("/admin", async (req, res) => {
               `
               : `
                 <div class="empty-state">
-                  <h3>ابدأ بأول بطاقة</h3>
-                  <p class="muted">أنشئ بطاقة جديدة، وبعدها انسخ الرابط واكتبه على كارت الـ NFC.</p>
-                  <a class="button button-primary" href="/admin/new">إضافة أول بطاقة</a>
+                  <h3>${escapeHtml(t(lang, "start_first_card_title"))}</h3>
+                  <p class="muted">${escapeHtml(t(lang, "start_first_card_copy"))}</p>
+                  <a class="button button-primary" href="/admin/new">${escapeHtml(t(lang, "add_first_card"))}</a>
                 </div>
               `
           }
@@ -268,14 +283,18 @@ app.get("/admin", async (req, res) => {
 });
 
 app.get("/admin/new", (req, res) => {
+  const lang = getRequestLanguage(req);
+
   res.send(
     renderLayout({
-      title: "إضافة بطاقة جديدة",
+      req,
+      title: t(lang, "add_card_page_title"),
       content: renderPersonFormPage({
-        title: "إضافة بطاقة جديدة",
-        description: "أدخل البيانات الأساسية وارفع تسجيلًا صوتيًا يشرح التشخيص أو التعليمات المهمة.",
+        req,
+        title: t(lang, "add_card_page_title"),
+        description: t(lang, "add_card_description"),
         action: "/admin/people",
-        submitLabel: "حفظ البطاقة",
+        submitLabel: t(lang, "save_card"),
         person: emptyPerson(),
         previewUrl: buildPublicUrl(req, "generated-automatically")
       })
@@ -285,22 +304,25 @@ app.get("/admin/new", (req, res) => {
 
 app.post("/admin/people", async (req, res) => {
   let uploadedAudioPath = "";
+  const lang = getRequestLanguage(req);
 
   try {
     await runUploader(req, res);
 
     const input = parsePersonInput(req.body);
-    const validationError = validatePersonInput(input);
+    const validationError = validatePersonInput(input, lang);
 
     if (validationError) {
       res.status(400).send(
         renderLayout({
-          title: "إضافة بطاقة جديدة",
+          req,
+          title: t(lang, "add_card_page_title"),
           content: renderPersonFormPage({
-            title: "إضافة بطاقة جديدة",
-            description: "صحح البيانات المطلوبة ثم أعد الحفظ.",
+            req,
+            title: t(lang, "add_card_page_title"),
+            description: t(lang, "form_fix_required"),
             action: "/admin/people",
-            submitLabel: "حفظ البطاقة",
+            submitLabel: t(lang, "save_card"),
             person: input,
             errorMessage: validationError,
             previewUrl: buildPublicUrl(req, input.publicCode || "generated-automatically")
@@ -327,21 +349,23 @@ app.post("/admin/people", async (req, res) => {
       updated_at: timestamp
     });
 
-    res.redirect(`/admin?success=${encodeURIComponent("تم إنشاء البطاقة بنجاح.")}`);
+    res.redirect(`/admin?success=${encodeURIComponent("card_created_success")}`);
   } catch (error) {
     if (uploadedAudioPath) {
       await deleteStoredAudio(uploadedAudioPath);
     }
 
-    const message = mapErrorToMessage(error);
+    const message = mapErrorToMessage(error, lang);
     res.status(400).send(
       renderLayout({
-        title: "إضافة بطاقة جديدة",
+        req,
+        title: t(lang, "add_card_page_title"),
         content: renderPersonFormPage({
-          title: "إضافة بطاقة جديدة",
-          description: "تأكد من البيانات وحاول مرة أخرى.",
+          req,
+          title: t(lang, "add_card_page_title"),
+          description: t(lang, "form_retry_check"),
           action: "/admin/people",
-          submitLabel: "حفظ البطاقة",
+          submitLabel: t(lang, "save_card"),
           person: parsePersonInput(req.body || {}),
           errorMessage: message,
           previewUrl: buildPublicUrl(req, normalizeCode(req.body?.publicCode) || "generated-automatically")
@@ -353,20 +377,23 @@ app.post("/admin/people", async (req, res) => {
 
 app.get("/admin/people/:id/edit", async (req, res) => {
   const person = await findPersonById(req.params.id);
+  const lang = getRequestLanguage(req);
 
   if (!person) {
-    res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
+    res.status(404).send(renderNotFoundPage(req, t(lang, "card_not_found")));
     return;
   }
 
   res.send(
     renderLayout({
-      title: `تعديل بطاقة ${escapeHtml(person.full_name)}`,
+      req,
+      title: t(lang, "edit_card_page_title", { name: person.full_name }),
       content: renderPersonFormPage({
-        title: `تعديل بطاقة ${escapeHtml(person.full_name)}`,
-        description: "يمكنك تعديل البيانات أو استبدال التسجيل الصوتي الحالي.",
+        req,
+        title: t(lang, "edit_card_page_title", { name: person.full_name }),
+        description: t(lang, "edit_card_description"),
         action: `/admin/people/${person.id}`,
-        submitLabel: "حفظ التعديلات",
+        submitLabel: t(lang, "save_changes"),
         person,
         previewUrl: buildPublicUrl(req, person.public_code)
       })
@@ -377,9 +404,10 @@ app.get("/admin/people/:id/edit", async (req, res) => {
 app.post("/admin/people/:id", async (req, res) => {
   const current = await findPersonById(req.params.id);
   let uploadedAudioPath = "";
+  const lang = getRequestLanguage(req);
 
   if (!current) {
-    res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
+    res.status(404).send(renderNotFoundPage(req, t(lang, "card_not_found")));
     return;
   }
 
@@ -387,17 +415,19 @@ app.post("/admin/people/:id", async (req, res) => {
     await runUploader(req, res);
 
     const input = parsePersonInput(req.body);
-    const validationError = validatePersonInput(input);
+    const validationError = validatePersonInput(input, lang);
 
     if (validationError) {
       res.status(400).send(
         renderLayout({
-          title: `تعديل بطاقة ${escapeHtml(current.full_name)}`,
+          req,
+          title: t(lang, "edit_card_page_title", { name: current.full_name }),
           content: renderPersonFormPage({
-            title: `تعديل بطاقة ${escapeHtml(current.full_name)}`,
-            description: "صحح البيانات المطلوبة ثم أعد الحفظ.",
+            req,
+            title: t(lang, "edit_card_page_title", { name: current.full_name }),
+            description: t(lang, "form_fix_required"),
             action: `/admin/people/${current.id}`,
-            submitLabel: "حفظ التعديلات",
+            submitLabel: t(lang, "save_changes"),
             person: { ...current, ...input },
             errorMessage: validationError,
             previewUrl: buildPublicUrl(req, input.publicCode || current.public_code)
@@ -439,21 +469,23 @@ app.post("/admin/people/:id", async (req, res) => {
       await deleteStoredAudio(current.audio_path);
     }
 
-    res.redirect(`/admin?success=${encodeURIComponent("تم تحديث البطاقة بنجاح.")}`);
+    res.redirect(`/admin?success=${encodeURIComponent("card_updated_success")}`);
   } catch (error) {
     if (uploadedAudioPath) {
       await deleteStoredAudio(uploadedAudioPath);
     }
 
-    const message = mapErrorToMessage(error);
+    const message = mapErrorToMessage(error, lang);
     res.status(400).send(
       renderLayout({
-        title: `تعديل بطاقة ${escapeHtml(current.full_name)}`,
+        req,
+        title: t(lang, "edit_card_page_title", { name: current.full_name }),
         content: renderPersonFormPage({
-          title: `تعديل بطاقة ${escapeHtml(current.full_name)}`,
-          description: "تأكد من البيانات وحاول مرة أخرى.",
+          req,
+          title: t(lang, "edit_card_page_title", { name: current.full_name }),
+          description: t(lang, "form_retry_check"),
           action: `/admin/people/${current.id}`,
-          submitLabel: "حفظ التعديلات",
+          submitLabel: t(lang, "save_changes"),
           person: { ...current, ...parsePersonInput(req.body || {}) },
           errorMessage: message,
           previewUrl: buildPublicUrl(req, normalizeCode(req.body?.publicCode) || current.public_code)
@@ -465,9 +497,10 @@ app.post("/admin/people/:id", async (req, res) => {
 
 app.post("/admin/people/:id/delete", async (req, res) => {
   const person = await findPersonById(req.params.id);
+  const lang = getRequestLanguage(req);
 
   if (!person) {
-    res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
+    res.status(404).send(renderNotFoundPage(req, t(lang, "card_not_found")));
     return;
   }
 
@@ -477,21 +510,23 @@ app.post("/admin/people/:id/delete", async (req, res) => {
     await deleteStoredAudio(person.audio_path);
   }
 
-  res.redirect(`/admin?success=${encodeURIComponent("تم حذف البطاقة بنجاح.")}`);
+  res.redirect(`/admin?success=${encodeURIComponent("card_deleted_success")}`);
 });
 
 app.get("/p/:publicCode", async (req, res) => {
   const person = await findPersonByCode(req.params.publicCode);
+  const lang = getRequestLanguage(req);
 
   if (!person) {
-    res.status(404).send(renderNotFoundPage("الرابط غير صحيح أو البطاقة لم تعد متاحة."));
+    res.status(404).send(renderNotFoundPage(req, t(lang, "invalid_public_link")));
     return;
   }
 
   res.send(
     renderLayout({
+      req,
       title: person.full_name,
-      content: renderPublicProfile(person)
+      content: renderPublicProfile(person, req)
     })
   );
 });
@@ -500,13 +535,13 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, persistence: getPersistenceMode() });
 });
 
-app.use((_req, res) => {
-  res.status(404).send(renderNotFoundPage("الصفحة المطلوبة غير موجودة."));
+app.use((req, res) => {
+  res.status(404).send(renderNotFoundPage(req, t(getRequestLanguage(req), "page_not_found")));
 });
 
-app.use((error, _req, res, _next) => {
+app.use((error, req, res, _next) => {
   console.error(error);
-  res.status(500).send(renderNotFoundPage("حدث خطأ غير متوقع. جرّب مرة أخرى بعد قليل."));
+  res.status(500).send(renderNotFoundPage(req, t(getRequestLanguage(req), "unexpected_error_try_again")));
 });
 
 if (require.main === module) {
@@ -563,24 +598,381 @@ function emptyPerson() {
   };
 }
 
-function validatePersonInput(input) {
+const TRANSLATIONS = {
+  en: {
+    site_short_name: "NFC Care Cards",
+    site_name: "NFC Cards for Blind People",
+    site_tagline: "Smart identity + instant help page",
+    nav_home: "Home",
+    nav_admin: "Dashboard",
+    language_toggle_label: "Language switch",
+    lang_english: "English",
+    lang_arabic: "العربية",
+    footer_note:
+      "This version is a practical starting point for the project. Add stronger login and permissions before real-world use.",
+    admin_login_title: "Admin Login",
+    home_title: "NFC Cards for Blind People",
+    hero_kicker: "NFC 13.56MHz + smart ID page",
+    hero_title: "A practical way for blind people to share essential details quickly and safely.",
+    hero_description:
+      "The card stores only a short link. When tapped with a phone, it opens a page with the name, address, contact numbers, a case summary, and a voice recording for diagnosis or key instructions.",
+    open_dashboard: "Open Dashboard",
+    view_demo_card: "View Demo Card",
+    cards_registered_count: "cards registered right now",
+    one_link_value: "1 link",
+    one_link_label: "written to the card instead of storing all details",
+    voice_text_value: "Voice + text",
+    voice_text_label: "to explain the case more clearly to anyone helping",
+    how_it_works_title: "How it works",
+    step_1_title: "1. Register the person",
+    step_1_copy: "Add the person's details and a voice file from the dashboard.",
+    step_2_title: "2. Generate the card link",
+    step_2_copy: "The website creates a stable public link like /p/demo-card.",
+    step_3_title: "3. Write the link to NFC",
+    step_3_copy: "Store only the link on the card, or on a QR code as a backup.",
+    existing_cards_title: "Available cards",
+    add_new_card: "Add New Card",
+    no_cards_title: "No cards yet",
+    no_cards_copy: "Add the first card from the dashboard, then write its link to the NFC card.",
+    admin_title: "Dashboard",
+    admin_kicker: "Admin Dashboard",
+    admin_heading: "Manage NFC care cards",
+    admin_description: "Add cases, update details, and upload voice recordings that appear on the public link.",
+    add_card: "Add Card",
+    back_home: "Back Home",
+    name_column: "Name",
+    card_code_column: "Card Code",
+    contact_column: "Contact",
+    public_link_column: "Public Link",
+    actions_column: "Actions",
+    start_first_card_title: "Start with the first card",
+    start_first_card_copy: "Create a new card, then copy its link and write it to the NFC card.",
+    add_first_card: "Add First Card",
+    card_code_label: "Card code",
+    address_label: "Address",
+    mobile_label: "Mobile",
+    emergency_label: "Emergency",
+    open_public_page: "Open Public Page",
+    edit_label: "Edit",
+    link_label: "Link",
+    no_case_summary: "No case summary has been added yet.",
+    no_emergency_phone: "No emergency number",
+    delete_confirm: "Do you want to delete this card?",
+    delete_label: "Delete",
+    data_management_kicker: "Data Management",
+    back_to_admin: "Back to Dashboard",
+    name_label: "Name",
+    full_name_placeholder: "Full name",
+    card_code_input_label: "Card code / link",
+    card_code_placeholder: "Example: card-001",
+    card_code_helper: "Use English letters and numbers only, or leave it blank to generate automatically.",
+    address_placeholder: "City - street - any description that helps someone reach the person",
+    phone_placeholder: "01xxxxxxxxx",
+    emergency_phone_label: "Emergency phone",
+    emergency_placeholder: "Parent or caregiver phone number",
+    diagnosis_label: "Case summary",
+    diagnosis_placeholder: "Short summary of the case or any important instructions",
+    notes_label: "Additional notes",
+    notes_placeholder: "Such as allergies, medications, or any non-sensitive details",
+    audio_label: "Voice recording",
+    audio_helper: "A short, clear recording is best for explaining the diagnosis or how to communicate.",
+    current_recording: "Current recording",
+    remove_current_recording: "Remove the current recording if no replacement file is uploaded",
+    expected_link_label: "Expected link on the card",
+    localhost_warning:
+      "Warning: do not write a localhost link onto the card. The phone will try to open itself. Use a real domain, set PUBLIC_BASE_URL, or open the site through a network address like 192.168.x.x.",
+    ndef_helper: "This is the URL you should write to the card as an NDEF URL record.",
+    test_card_helper: "After writing the card, test it with a phone before locking or distributing it.",
+    cancel: "Cancel",
+    add_card_page_title: "Add New Card",
+    add_card_description: "Enter the essential details and upload a voice recording for diagnosis or key instructions.",
+    save_card: "Save Card",
+    form_fix_required: "Fix the required fields, then save again.",
+    form_retry_check: "Check the data and try again.",
+    edit_card_page_title: "Edit {name}",
+    edit_card_description: "You can update the details or replace the current voice recording.",
+    save_changes: "Save Changes",
+    smart_identity_kicker: "Smart identity card",
+    call_mobile: "Call Mobile",
+    call_emergency: "Call Emergency",
+    unavailable: "Not available",
+    case_description_heading: "Case Summary",
+    no_case_description_yet: "No case summary has been added yet.",
+    additional_notes_heading: "Additional Notes",
+    no_additional_notes: "No additional notes.",
+    audio_heading: "Voice Recording",
+    audio_description: "You can play the recording for a clearer explanation of the case or diagnosis.",
+    no_audio_yet: "No voice recording has been uploaded for this card yet.",
+    not_found_title: "Not Found",
+    not_found_heading: "Not Found",
+    login_kicker: "Dashboard Protection",
+    login_heading: "Admin Login",
+    login_description: "Medical data and dashboard content should stay protected before publishing online.",
+    username_label: "Username",
+    password_label: "Password",
+    password_placeholder: "Enter the password",
+    login_button: "Log In",
+    admin_config_title: "Admin Setup",
+    admin_config_heading: "Dashboard is not ready",
+    admin_config_prefix: "Before putting the project online, set the environment variable",
+    admin_config_suffix: "to protect the admin page.",
+    logout: "Log Out",
+    local_admin_warning:
+      "The dashboard is open locally only because ADMIN_PASSWORD is not set. Set a password before publishing online.",
+    login_invalid: "Invalid login credentials.",
+    login_required: "You need to log in first.",
+    card_created_success: "Card created successfully.",
+    card_updated_success: "Card updated successfully.",
+    card_deleted_success: "Card deleted successfully.",
+    card_not_found: "The requested card could not be found.",
+    invalid_public_link: "This link is invalid or the card is no longer available.",
+    page_not_found: "The requested page could not be found.",
+    unexpected_error_try_again: "An unexpected error occurred. Please try again shortly.",
+    name_required: "Name is required.",
+    address_required: "Address is required.",
+    mobile_required: "Mobile number is required.",
+    card_code_min: "The card code must be at least 4 English letters or numbers.",
+    invalid_audio_file: "Please upload a valid audio file such as MP3 or WAV.",
+    duplicate_card_code: "This card code is already in use. Choose a different code.",
+    audio_file_too_large: "The audio file is too large. The current limit is {size}MB.",
+    supabase_schema_missing: "Supabase is connected, but the database is not ready yet. Run the schema first, then try again.",
+    unexpected_error_generic: "An unexpected error occurred."
+  },
+  ar: {
+    site_short_name: "بطاقات NFC",
+    site_name: "بطاقات NFC للمكفوفين",
+    site_tagline: "هوية ذكية + صفحة مساعدة فورية",
+    nav_home: "الرئيسية",
+    nav_admin: "لوحة الإدارة",
+    language_toggle_label: "تبديل اللغة",
+    lang_english: "English",
+    lang_arabic: "العربية",
+    footer_note:
+      "النسخة الحالية مخصصة كبداية عملية للمشروع. يفضل إضافة تسجيل دخول وصلاحيات قبل الاستخدام الفعلي.",
+    admin_login_title: "تسجيل دخول الإدارة",
+    home_title: "بطاقات NFC للمكفوفين",
+    hero_kicker: "NFC 13.56MHz + صفحة تعريف ذكية",
+    hero_title: "حل عملي يساعد المكفوفين يوصلوا بياناتهم الأساسية بسرعة وأمان.",
+    hero_description:
+      "الكارت يحمل رابط قصير فقط، وعند لمسه بالموبايل تفتح صفحة فيها الاسم، العنوان، أرقام التواصل، وصف الحالة، وتسجيل صوتي يشرح التشخيص أو التعليمات المهمة.",
+    open_dashboard: "فتح لوحة الإدارة",
+    view_demo_card: "عرض بطاقة تجريبية",
+    cards_registered_count: "بطاقات مسجلة حاليًا",
+    one_link_value: "1 رابط",
+    one_link_label: "يُكتب على الكارت بدل تخزين كل البيانات",
+    voice_text_value: "صوت + نص",
+    voice_text_label: "لشرح الحالة بشكل أوضح لمن يساعد",
+    how_it_works_title: "كيف يشتغل المشروع؟",
+    step_1_title: "1. تسجيل الحالة",
+    step_1_copy: "تضيف بيانات الشخص وملف صوتي من لوحة الإدارة.",
+    step_2_title: "2. إنشاء رابط البطاقة",
+    step_2_copy: "الموقع ينشئ رابطًا ثابتًا مثل /p/demo-card.",
+    step_3_title: "3. كتابة الرابط على NFC",
+    step_3_copy: "يتم تخزين الرابط فقط على الكارت أو على QR كنسخة احتياطية.",
+    existing_cards_title: "البطاقات الموجودة",
+    add_new_card: "إضافة بطاقة جديدة",
+    no_cards_title: "لسه مفيش بطاقات مضافة",
+    no_cards_copy: "ابدأ بإضافة أول بطاقة من لوحة الإدارة ثم اكتب الرابط على كارت الـ NFC.",
+    admin_title: "لوحة الإدارة",
+    admin_kicker: "لوحة الإدارة",
+    admin_heading: "إدارة بطاقات المكفوفين",
+    admin_description: "أضف الحالات، حدّث البيانات، وارفع التسجيلات الصوتية التي ستظهر في الرابط العام.",
+    add_card: "إضافة بطاقة",
+    back_home: "العودة للرئيسية",
+    name_column: "الاسم",
+    card_code_column: "كود البطاقة",
+    contact_column: "التواصل",
+    public_link_column: "الرابط العام",
+    actions_column: "التحكم",
+    start_first_card_title: "ابدأ بأول بطاقة",
+    start_first_card_copy: "أنشئ بطاقة جديدة، وبعدها انسخ الرابط واكتبه على كارت الـ NFC.",
+    add_first_card: "إضافة أول بطاقة",
+    card_code_label: "كود البطاقة",
+    address_label: "العنوان",
+    mobile_label: "الموبايل",
+    emergency_label: "الطوارئ",
+    open_public_page: "فتح الصفحة العامة",
+    edit_label: "تعديل",
+    link_label: "الرابط",
+    no_case_summary: "لا يوجد وصف حالة مضاف حتى الآن.",
+    no_emergency_phone: "لا يوجد رقم طوارئ",
+    delete_confirm: "هل تريد حذف البطاقة؟",
+    delete_label: "حذف",
+    data_management_kicker: "إدارة البيانات",
+    back_to_admin: "العودة للوحة الإدارة",
+    name_label: "الاسم",
+    full_name_placeholder: "الاسم الكامل",
+    card_code_input_label: "كود البطاقة / الرابط",
+    card_code_placeholder: "مثال: card-001",
+    card_code_helper: "اكتب حروفًا وأرقامًا إنجليزية فقط، أو اتركه فارغًا ليتم توليده تلقائيًا.",
+    address_placeholder: "المدينة - الشارع - أي وصف يساعد للوصول",
+    phone_placeholder: "01xxxxxxxxx",
+    emergency_phone_label: "رقم الطوارئ",
+    emergency_placeholder: "رقم ولي الأمر أو الشخص المسؤول",
+    diagnosis_label: "وصف الحالة",
+    diagnosis_placeholder: "ملخص سريع للحالة أو التعليمات المهمة",
+    notes_label: "ملاحظات إضافية",
+    notes_placeholder: "مثل الحساسية، الأدوية، أو أي بيانات غير حساسة",
+    audio_label: "التسجيل الصوتي",
+    audio_helper: "يفضل تسجيل قصير وواضح يشرح التشخيص أو طريقة التواصل المناسبة.",
+    current_recording: "التسجيل الحالي",
+    remove_current_recording: "حذف التسجيل الحالي إذا لم يتم رفع ملف بديل",
+    expected_link_label: "الرابط المتوقع على الكارت",
+    localhost_warning:
+      "تنبيه: لا تكتب رابطًا فيه localhost على الكارت، لأن الموبايل سيحاول فتح نفسه. استخدم دومين حقيقي أو اضبط PUBLIC_BASE_URL أو افتح الموقع بعنوان الشبكة مثل 192.168.x.x.",
+    ndef_helper: "هذا هو الرابط الذي تكتبه على الكارت كتسجيل URL من نوع NDEF.",
+    test_card_helper: "بعد الكتابة على الكارت، اختبره بالموبايل قبل قفل الكارت أو توزيعه.",
+    cancel: "إلغاء",
+    add_card_page_title: "إضافة بطاقة جديدة",
+    add_card_description: "أدخل البيانات الأساسية وارفع تسجيلًا صوتيًا يشرح التشخيص أو التعليمات المهمة.",
+    save_card: "حفظ البطاقة",
+    form_fix_required: "صحح البيانات المطلوبة ثم أعد الحفظ.",
+    form_retry_check: "تأكد من البيانات وحاول مرة أخرى.",
+    edit_card_page_title: "تعديل بطاقة {name}",
+    edit_card_description: "يمكنك تعديل البيانات أو استبدال التسجيل الصوتي الحالي.",
+    save_changes: "حفظ التعديلات",
+    smart_identity_kicker: "بطاقة تعريف ذكية",
+    call_mobile: "اتصال بالموبايل",
+    call_emergency: "اتصال بالطوارئ",
+    unavailable: "غير متوفر",
+    case_description_heading: "وصف الحالة",
+    no_case_description_yet: "لم يتم إضافة وصف للحالة بعد.",
+    additional_notes_heading: "ملاحظات إضافية",
+    no_additional_notes: "لا توجد ملاحظات إضافية.",
+    audio_heading: "التسجيل الصوتي",
+    audio_description: "يمكن تشغيل التسجيل لشرح الحالة أو التشخيص بشكل أوضح.",
+    no_audio_yet: "لا يوجد تسجيل صوتي مرفوع لهذه البطاقة حتى الآن.",
+    not_found_title: "غير موجود",
+    not_found_heading: "غير موجود",
+    login_kicker: "حماية لوحة الإدارة",
+    login_heading: "تسجيل دخول الإدارة",
+    login_description: "البيانات الطبية والمحتوى الإداري يجب أن يكونا محميين قبل النشر على الإنترنت.",
+    username_label: "اسم المستخدم",
+    password_label: "كلمة المرور",
+    password_placeholder: "اكتب كلمة المرور",
+    login_button: "دخول",
+    admin_config_title: "إعداد الإدارة",
+    admin_config_heading: "لوحة الإدارة غير جاهزة",
+    admin_config_prefix: "قبل تشغيل المشروع أونلاين، عيّن متغير البيئة",
+    admin_config_suffix: "لحماية صفحة الإدارة.",
+    logout: "تسجيل الخروج",
+    local_admin_warning:
+      "لوحة الإدارة مفتوحة محليًا فقط لأن ADMIN_PASSWORD غير مضبوط. قبل النشر أونلاين يجب تعيين كلمة مرور.",
+    login_invalid: "بيانات الدخول غير صحيحة.",
+    login_required: "يجب تسجيل الدخول أولاً.",
+    card_created_success: "تم إنشاء البطاقة بنجاح.",
+    card_updated_success: "تم تحديث البطاقة بنجاح.",
+    card_deleted_success: "تم حذف البطاقة بنجاح.",
+    card_not_found: "البطاقة المطلوبة غير موجودة.",
+    invalid_public_link: "الرابط غير صحيح أو البطاقة لم تعد متاحة.",
+    page_not_found: "الصفحة المطلوبة غير موجودة.",
+    unexpected_error_try_again: "حدث خطأ غير متوقع. جرّب مرة أخرى بعد قليل.",
+    name_required: "الاسم مطلوب.",
+    address_required: "العنوان مطلوب.",
+    mobile_required: "رقم الموبايل مطلوب.",
+    card_code_min: "كود البطاقة يجب أن يكون 4 أحرف أو أرقام على الأقل.",
+    invalid_audio_file: "يرجى رفع ملف صوتي صالح مثل MP3 أو WAV.",
+    duplicate_card_code: "كود البطاقة مستخدم بالفعل. اختر كودًا مختلفًا.",
+    audio_file_too_large: "حجم الملف الصوتي كبير. الحد الأقصى الحالي هو {size}MB.",
+    supabase_schema_missing: "ربط Supabase موجود لكن قاعدة البيانات لم تُجهز بعد. شغّل ملف schema أولًا ثم أعد المحاولة.",
+    unexpected_error_generic: "حدث خطأ غير متوقع."
+  }
+};
+
+function validatePersonInput(input, lang = DEFAULT_LANGUAGE) {
   if (!input.fullName) {
-    return "الاسم مطلوب.";
+    return t(lang, "name_required");
   }
 
   if (!input.address) {
-    return "العنوان مطلوب.";
+    return t(lang, "address_required");
   }
 
   if (!input.phone) {
-    return "رقم الموبايل مطلوب.";
+    return t(lang, "mobile_required");
   }
 
   if (input.publicCode && input.publicCode.length < 4) {
-    return "كود البطاقة يجب أن يكون 4 أحرف أو أرقام على الأقل.";
+    return t(lang, "card_code_min");
   }
 
   return "";
+}
+
+function applyLanguagePreference(req, res, next) {
+  const requestedLanguage = normalizeLanguage(req.query?.lang);
+  const cookieLanguage = normalizeLanguage(parseCookies(req)[LANGUAGE_COOKIE]);
+  const language = requestedLanguage || cookieLanguage || DEFAULT_LANGUAGE;
+
+  req.language = language;
+
+  if (requestedLanguage && requestedLanguage !== cookieLanguage) {
+    setCookie(res, req, LANGUAGE_COOKIE, requestedLanguage, {
+      maxAgeMs: LANGUAGE_COOKIE_TTL_MS,
+      sameSite: "Lax",
+      path: "/"
+    });
+  }
+
+  next();
+}
+
+function normalizeLanguage(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return SUPPORTED_LANGUAGES.has(normalized) ? normalized : "";
+}
+
+function getRequestLanguage(req) {
+  return normalizeLanguage(req?.language) || normalizeLanguage(parseCookies(req)[LANGUAGE_COOKIE]) || DEFAULT_LANGUAGE;
+}
+
+function isRtlLanguage(language) {
+  return language === "ar";
+}
+
+function t(language, key, variables = {}) {
+  const normalizedLanguage = normalizeLanguage(language) || DEFAULT_LANGUAGE;
+  const dictionary = TRANSLATIONS[normalizedLanguage] || TRANSLATIONS[DEFAULT_LANGUAGE];
+  const fallback = TRANSLATIONS[DEFAULT_LANGUAGE][key] || key;
+  const template = dictionary[key] || fallback;
+
+  return String(template).replace(/\{(\w+)\}/g, (_match, variableName) => String(variables[variableName] ?? ""));
+}
+
+function resolveFlashMessage(req, value) {
+  const key = normalizeText(value);
+
+  if (!key) {
+    return "";
+  }
+
+  if (FLASH_MESSAGE_KEYS.has(key)) {
+    return t(getRequestLanguage(req), key);
+  }
+
+  return key;
+}
+
+function buildLanguageUrl(req, language) {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  const currentUrl = new URL(req.originalUrl || req.url || "/", baseUrl);
+  currentUrl.searchParams.set("lang", language);
+  return `${currentUrl.pathname}${currentUrl.search}`;
+}
+
+function renderLanguageToggle(req) {
+  const currentLanguage = getRequestLanguage(req);
+
+  return `
+    <div class="lang-toggle" aria-label="${escapeAttribute(t(currentLanguage, "language_toggle_label"))}">
+      <a href="${escapeAttribute(buildLanguageUrl(req, "en"))}"${currentLanguage === "en" ? ' aria-current="page"' : ""}>
+        ${escapeHtml(t(currentLanguage, "lang_english"))}
+      </a>
+      <a href="${escapeAttribute(buildLanguageUrl(req, "ar"))}"${currentLanguage === "ar" ? ' aria-current="page"' : ""}>
+        ${escapeHtml(t(currentLanguage, "lang_arabic"))}
+      </a>
+    </div>
+  `;
 }
 
 function normalizeText(value) {
@@ -667,16 +1059,19 @@ function buildPublicUrl(req, publicCode) {
   return `${resolvePublicBaseUrl(req)}/p/${encodeURIComponent(safeCode)}`;
 }
 
-function renderLayout({ title, content }) {
+function renderLayout({ req, title, content }) {
+  const lang = getRequestLanguage(req);
+  const direction = isRtlLanguage(lang) ? "rtl" : "ltr";
+
   return `<!DOCTYPE html>
-  <html lang="ar" dir="rtl">
+  <html lang="${escapeAttribute(lang)}" dir="${escapeAttribute(direction)}">
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>${escapeHtml(title)} | بطاقات NFC</title>
+      <title>${escapeHtml(title)} | ${escapeHtml(t(lang, "site_short_name"))}</title>
       <link rel="preconnect" href="https://fonts.googleapis.com" />
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-      <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet" />
       <link rel="stylesheet" href="/styles.css" />
     </head>
     <body>
@@ -685,18 +1080,21 @@ function renderLayout({ title, content }) {
           <a class="brand" href="/">
             <span class="brand-mark">◎</span>
             <span class="brand-copy">
-              <strong>بطاقات NFC للمكفوفين</strong>
-              <span>هوية ذكية + صفحة مساعدة فورية</span>
+              <strong>${escapeHtml(t(lang, "site_name"))}</strong>
+              <span>${escapeHtml(t(lang, "site_tagline"))}</span>
             </span>
           </a>
-          <nav class="nav">
-            <a href="/">الرئيسية</a>
-            <a href="/admin">لوحة الإدارة</a>
-          </nav>
+          <div class="topbar-actions">
+            <nav class="nav">
+              <a href="/">${escapeHtml(t(lang, "nav_home"))}</a>
+              <a href="/admin">${escapeHtml(t(lang, "nav_admin"))}</a>
+            </nav>
+            ${renderLanguageToggle(req)}
+          </div>
         </header>
         ${content}
         <p class="footer-note">
-          النسخة الحالية مخصصة كبداية عملية للمشروع. يفضل إضافة تسجيل دخول وصلاحيات قبل الاستخدام الفعلي.
+          ${escapeHtml(t(lang, "footer_note"))}
         </p>
       </main>
     </body>
@@ -704,52 +1102,56 @@ function renderLayout({ title, content }) {
 }
 
 function renderHomeCard(person, req) {
+  const lang = getRequestLanguage(req);
+
   return `
     <article class="card">
-      <span class="chip">كود البطاقة: ${escapeHtml(person.public_code)}</span>
+      <span class="chip">${escapeHtml(t(lang, "card_code_label"))}: ${escapeHtml(person.public_code)}</span>
       <h3>${escapeHtml(person.full_name)}</h3>
-      <p class="muted">${escapeHtml(person.diagnosis_summary || "لا يوجد وصف حالة مضاف حتى الآن.")}</p>
+      <p class="muted">${escapeHtml(person.diagnosis_summary || t(lang, "no_case_summary"))}</p>
       <div class="meta">
         <div class="meta-item">
-          <span>العنوان</span>
+          <span>${escapeHtml(t(lang, "address_label"))}</span>
           <span>${escapeHtml(person.address)}</span>
         </div>
         <div class="meta-item">
-          <span>الموبايل</span>
+          <span>${escapeHtml(t(lang, "mobile_label"))}</span>
           <span>${escapeHtml(person.phone)}</span>
         </div>
       </div>
       <div class="button-row">
-        <a class="button button-primary" href="/p/${encodeURIComponent(person.public_code)}">فتح الصفحة العامة</a>
-        <a class="button button-secondary" href="/admin/people/${person.id}/edit">تعديل</a>
+        <a class="button button-primary" href="/p/${encodeURIComponent(person.public_code)}">${escapeHtml(t(lang, "open_public_page"))}</a>
+        <a class="button button-secondary" href="/admin/people/${person.id}/edit">${escapeHtml(t(lang, "edit_label"))}</a>
       </div>
-      <p class="helper">الرابط: ${escapeHtml(buildPublicUrl(req, person.public_code))}</p>
+      <p class="helper">${escapeHtml(t(lang, "link_label"))}: ${escapeHtml(buildPublicUrl(req, person.public_code))}</p>
     </article>
   `;
 }
 
 function renderAdminRow(person, req) {
+  const lang = getRequestLanguage(req);
+
   return `
     <tr>
-      <td data-label="الاسم">
+      <td data-label="${escapeAttribute(t(lang, "name_column"))}">
         <strong>${escapeHtml(person.full_name)}</strong><br />
         <span class="helper">${escapeHtml(person.address)}</span>
       </td>
-      <td data-label="كود البطاقة">
+      <td data-label="${escapeAttribute(t(lang, "card_code_column"))}">
         <span class="status-chip">${escapeHtml(person.public_code)}</span>
       </td>
-      <td data-label="التواصل">
+      <td data-label="${escapeAttribute(t(lang, "contact_column"))}">
         <div>${escapeHtml(person.phone)}</div>
-        <div class="helper">${escapeHtml(person.emergency_phone || "لا يوجد رقم طوارئ")}</div>
+        <div class="helper">${escapeHtml(person.emergency_phone || t(lang, "no_emergency_phone"))}</div>
       </td>
-      <td data-label="الرابط العام">
+      <td data-label="${escapeAttribute(t(lang, "public_link_column"))}">
         <a href="/p/${encodeURIComponent(person.public_code)}">${escapeHtml(buildPublicUrl(req, person.public_code))}</a>
       </td>
-      <td data-label="التحكم">
+      <td data-label="${escapeAttribute(t(lang, "actions_column"))}">
         <div class="table-actions">
-          <a class="button button-secondary" href="/admin/people/${person.id}/edit">تعديل</a>
-          <form method="post" action="/admin/people/${person.id}/delete" onsubmit="return confirm('هل تريد حذف البطاقة؟');">
-            <button class="button-danger" type="submit">حذف</button>
+          <a class="button button-secondary" href="/admin/people/${person.id}/edit">${escapeHtml(t(lang, "edit_label"))}</a>
+          <form method="post" action="/admin/people/${person.id}/delete" onsubmit="return confirm('${escapeAttribute(t(lang, "delete_confirm"))}');">
+            <button class="button-danger" type="submit">${escapeHtml(t(lang, "delete_label"))}</button>
           </form>
         </div>
       </td>
@@ -757,7 +1159,8 @@ function renderAdminRow(person, req) {
   `;
 }
 
-function renderPersonFormPage({ title, description, action, submitLabel, person, errorMessage = "", previewUrl }) {
+function renderPersonFormPage({ req, title, description, action, submitLabel, person, errorMessage = "", previewUrl }) {
+  const lang = getRequestLanguage(req);
   const fullName = person.full_name ?? person.fullName ?? "";
   const address = person.address ?? "";
   const phone = person.phone ?? "";
@@ -770,68 +1173,68 @@ function renderPersonFormPage({ title, description, action, submitLabel, person,
   return `
     <section class="section-head">
       <div>
-        <span class="hero-kicker">إدارة البيانات</span>
-        <h1 class="page-title">${title}</h1>
-        <p class="muted">${description}</p>
+        <span class="hero-kicker">${escapeHtml(t(lang, "data_management_kicker"))}</span>
+        <h1 class="page-title">${escapeHtml(title)}</h1>
+        <p class="muted">${escapeHtml(description)}</p>
       </div>
-      <a class="button button-secondary" href="/admin">العودة للوحة الإدارة</a>
+      <a class="button button-secondary" href="/admin">${escapeHtml(t(lang, "back_to_admin"))}</a>
     </section>
 
-    ${renderLocalAdminWarning()}
+    ${renderLocalAdminWarning(req)}
     ${errorMessage ? renderAlert("error", errorMessage) : ""}
 
     <section class="form-card">
       <form method="post" action="${action}" enctype="multipart/form-data" class="stack">
         <div class="form-grid">
           <div class="field">
-            <label for="fullName">الاسم</label>
-            <input id="fullName" name="fullName" type="text" required value="${escapeAttribute(fullName)}" placeholder="الاسم الكامل" />
+            <label for="fullName">${escapeHtml(t(lang, "name_label"))}</label>
+            <input id="fullName" name="fullName" type="text" required value="${escapeAttribute(fullName)}" placeholder="${escapeAttribute(t(lang, "full_name_placeholder"))}" />
           </div>
 
           <div class="field">
-            <label for="publicCode">كود البطاقة / الرابط</label>
-            <input id="publicCode" name="publicCode" type="text" value="${escapeAttribute(publicCode)}" placeholder="مثال: card-001" />
-            <span class="helper">اكتب حروفًا وأرقامًا إنجليزية فقط، أو اتركه فارغًا ليتم توليده تلقائيًا.</span>
+            <label for="publicCode">${escapeHtml(t(lang, "card_code_input_label"))}</label>
+            <input id="publicCode" name="publicCode" type="text" value="${escapeAttribute(publicCode)}" placeholder="${escapeAttribute(t(lang, "card_code_placeholder"))}" />
+            <span class="helper">${escapeHtml(t(lang, "card_code_helper"))}</span>
           </div>
 
           <div class="field field-full">
-            <label for="address">العنوان</label>
-            <input id="address" name="address" type="text" required value="${escapeAttribute(address)}" placeholder="المدينة - الشارع - أي وصف يساعد للوصول" />
+            <label for="address">${escapeHtml(t(lang, "address_label"))}</label>
+            <input id="address" name="address" type="text" required value="${escapeAttribute(address)}" placeholder="${escapeAttribute(t(lang, "address_placeholder"))}" />
           </div>
 
           <div class="field">
-            <label for="phone">رقم الموبايل</label>
-            <input id="phone" name="phone" type="tel" required value="${escapeAttribute(phone)}" placeholder="01xxxxxxxxx" />
+            <label for="phone">${escapeHtml(t(lang, "mobile_label"))}</label>
+            <input id="phone" name="phone" type="tel" required value="${escapeAttribute(phone)}" placeholder="${escapeAttribute(t(lang, "phone_placeholder"))}" />
           </div>
 
           <div class="field">
-            <label for="emergencyPhone">رقم الطوارئ</label>
-            <input id="emergencyPhone" name="emergencyPhone" type="tel" value="${escapeAttribute(emergencyPhone)}" placeholder="رقم ولي الأمر أو الشخص المسؤول" />
+            <label for="emergencyPhone">${escapeHtml(t(lang, "emergency_phone_label"))}</label>
+            <input id="emergencyPhone" name="emergencyPhone" type="tel" value="${escapeAttribute(emergencyPhone)}" placeholder="${escapeAttribute(t(lang, "emergency_placeholder"))}" />
           </div>
 
           <div class="field field-full">
-            <label for="diagnosisSummary">وصف الحالة</label>
-            <textarea id="diagnosisSummary" name="diagnosisSummary" placeholder="ملخص سريع للحالة أو التعليمات المهمة">${escapeHtml(diagnosisSummary)}</textarea>
+            <label for="diagnosisSummary">${escapeHtml(t(lang, "diagnosis_label"))}</label>
+            <textarea id="diagnosisSummary" name="diagnosisSummary" placeholder="${escapeAttribute(t(lang, "diagnosis_placeholder"))}">${escapeHtml(diagnosisSummary)}</textarea>
           </div>
 
           <div class="field field-full">
-            <label for="notes">ملاحظات إضافية</label>
-            <textarea id="notes" name="notes" placeholder="مثل الحساسية، الأدوية، أو أي بيانات غير حساسة">${escapeHtml(notes)}</textarea>
+            <label for="notes">${escapeHtml(t(lang, "notes_label"))}</label>
+            <textarea id="notes" name="notes" placeholder="${escapeAttribute(t(lang, "notes_placeholder"))}">${escapeHtml(notes)}</textarea>
           </div>
 
           <div class="field field-full">
-            <label for="audio">التسجيل الصوتي</label>
+            <label for="audio">${escapeHtml(t(lang, "audio_label"))}</label>
             <input id="audio" name="audio" type="file" accept="audio/*" />
-            <span class="helper">يفضل تسجيل قصير وواضح يشرح التشخيص أو طريقة التواصل المناسبة.</span>
+            <span class="helper">${escapeHtml(t(lang, "audio_helper"))}</span>
             ${
               person.audio_path
                 ? `
                   <div class="audio-box">
-                    <strong>التسجيل الحالي</strong>
+                    <strong>${escapeHtml(t(lang, "current_recording"))}</strong>
                     <audio controls src="${escapeAttribute(person.audio_path)}"></audio>
                     <label class="check" for="removeAudio">
                       <input id="removeAudio" name="removeAudio" type="checkbox" />
-                      حذف التسجيل الحالي إذا لم يتم رفع ملف بديل
+                      ${escapeHtml(t(lang, "remove_current_recording"))}
                     </label>
                   </div>
                 `
@@ -841,20 +1244,20 @@ function renderPersonFormPage({ title, description, action, submitLabel, person,
         </div>
 
         <div class="link-preview">
-          <strong>الرابط المتوقع على الكارت:</strong>
+          <strong>${escapeHtml(t(lang, "expected_link_label"))}:</strong>
           <div data-link-preview>${escapeHtml(previewUrl)}</div>
         </div>
         ${
           previewNeedsPublicHostWarning
-            ? `<p class="helper">تنبيه: لا تكتب رابطًا فيه localhost على الكارت، لأن الموبايل سيحاول فتح نفسه. استخدم دومين حقيقي أو اضبط PUBLIC_BASE_URL أو افتح الموقع بعنوان الشبكة مثل 192.168.x.x.</p>`
-            : `<p class="helper">هذا هو الرابط الذي تكتبه على الكارت كتسجيل URL من نوع NDEF.</p>`
+            ? `<p class="helper">${escapeHtml(t(lang, "localhost_warning"))}</p>`
+            : `<p class="helper">${escapeHtml(t(lang, "ndef_helper"))}</p>`
         }
-        <p class="helper">بعد الكتابة على الكارت، اختبره بالموبايل قبل قفل الكارت أو توزيعه.</p>
+        <p class="helper">${escapeHtml(t(lang, "test_card_helper"))}</p>
 
         <div class="button-row">
           <input type="submit" value="${escapeAttribute(submitLabel)}" />
-          <a class="button button-secondary" href="/admin">إلغاء</a>
-          ${renderAdminSessionActions()}
+          <a class="button button-secondary" href="/admin">${escapeHtml(t(lang, "cancel"))}</a>
+          ${renderAdminSessionActions(req)}
         </div>
       </form>
     </section>
@@ -890,43 +1293,44 @@ function renderPersonFormPage({ title, description, action, submitLabel, person,
   `;
 }
 
-function renderPublicProfile(person) {
+function renderPublicProfile(person, req) {
+  const lang = getRequestLanguage(req);
   const phoneLink = normalizePhoneHref(person.phone);
   const emergencyLink = normalizePhoneHref(person.emergency_phone);
 
   return `
     <section class="profile-header">
       <div class="profile-summary">
-        <span class="hero-kicker">بطاقة تعريف ذكية</span>
+        <span class="hero-kicker">${escapeHtml(t(lang, "smart_identity_kicker"))}</span>
         <h1 class="page-title">${escapeHtml(person.full_name)}</h1>
-        <p class="lead">${escapeHtml(person.diagnosis_summary || "لا يوجد وصف حالة مضاف حتى الآن.")}</p>
+        <p class="lead">${escapeHtml(person.diagnosis_summary || t(lang, "no_case_summary"))}</p>
         <div class="quick-actions">
-          <a class="button button-secondary" href="tel:${escapeAttribute(phoneLink)}">اتصال بالموبايل</a>
+          <a class="button button-secondary" href="tel:${escapeAttribute(phoneLink)}">${escapeHtml(t(lang, "call_mobile"))}</a>
           ${
             emergencyLink
-              ? `<a class="button button-secondary" href="tel:${escapeAttribute(emergencyLink)}">اتصال بالطوارئ</a>`
+              ? `<a class="button button-secondary" href="tel:${escapeAttribute(emergencyLink)}">${escapeHtml(t(lang, "call_emergency"))}</a>`
               : ""
           }
         </div>
       </div>
 
       <aside class="profile-card">
-        <span class="chip">كود البطاقة: ${escapeHtml(person.public_code)}</span>
+        <span class="chip">${escapeHtml(t(lang, "card_code_label"))}: ${escapeHtml(person.public_code)}</span>
         <div class="meta">
           <div class="meta-item">
-            <span>العنوان</span>
+            <span>${escapeHtml(t(lang, "address_label"))}</span>
             <span>${escapeHtml(person.address)}</span>
           </div>
           <div class="meta-item">
-            <span>رقم الموبايل</span>
+            <span>${escapeHtml(t(lang, "mobile_label"))}</span>
             <span><a href="tel:${escapeAttribute(phoneLink)}">${escapeHtml(person.phone)}</a></span>
           </div>
           <div class="meta-item">
-            <span>رقم الطوارئ</span>
+            <span>${escapeHtml(t(lang, "emergency_phone_label"))}</span>
             <span>${
               person.emergency_phone
                 ? `<a href="tel:${escapeAttribute(emergencyLink)}">${escapeHtml(person.emergency_phone)}</a>`
-                : "غير متوفر"
+                : escapeHtml(t(lang, "unavailable"))
             }</span>
           </div>
         </div>
@@ -935,26 +1339,26 @@ function renderPublicProfile(person) {
 
     <section class="profile-grid">
       <article class="profile-card">
-        <h3>وصف الحالة</h3>
-        <p class="muted">${formatMultiline(person.diagnosis_summary || "لم يتم إضافة وصف للحالة بعد.")}</p>
+        <h3>${escapeHtml(t(lang, "case_description_heading"))}</h3>
+        <p class="muted">${formatMultiline(person.diagnosis_summary || t(lang, "no_case_description_yet"))}</p>
       </article>
 
       <article class="profile-card">
-        <h3>ملاحظات إضافية</h3>
-        <p class="muted">${formatMultiline(person.notes || "لا توجد ملاحظات إضافية.")}</p>
+        <h3>${escapeHtml(t(lang, "additional_notes_heading"))}</h3>
+        <p class="muted">${formatMultiline(person.notes || t(lang, "no_additional_notes"))}</p>
       </article>
 
       <article class="profile-card">
-        <h3>التسجيل الصوتي</h3>
+        <h3>${escapeHtml(t(lang, "audio_heading"))}</h3>
         ${
           person.audio_path
             ? `
               <div class="audio-box">
-                <div>يمكن تشغيل التسجيل لشرح الحالة أو التشخيص بشكل أوضح.</div>
+                <div>${escapeHtml(t(lang, "audio_description"))}</div>
                 <audio controls src="${escapeAttribute(person.audio_path)}"></audio>
               </div>
             `
-            : `<p class="muted">لا يوجد تسجيل صوتي مرفوع لهذه البطاقة حتى الآن.</p>`
+            : `<p class="muted">${escapeHtml(t(lang, "no_audio_yet"))}</p>`
         }
       </article>
     </section>
@@ -966,16 +1370,19 @@ function renderAlert(type, message) {
   return `<div class="alert ${className}">${escapeHtml(message)}</div>`;
 }
 
-function renderNotFoundPage(message) {
+function renderNotFoundPage(req, message) {
+  const lang = getRequestLanguage(req);
+
   return renderLayout({
-    title: "غير موجود",
+    req,
+    title: t(lang, "not_found_title"),
     content: `
       <section class="empty-state">
-        <h1 class="page-title">غير موجود</h1>
+        <h1 class="page-title">${escapeHtml(t(lang, "not_found_heading"))}</h1>
         <p class="muted">${escapeHtml(message)}</p>
         <div class="button-row">
-          <a class="button button-primary" href="/">العودة للرئيسية</a>
-          <a class="button button-secondary" href="/admin">لوحة الإدارة</a>
+          <a class="button button-primary" href="/">${escapeHtml(t(lang, "back_home"))}</a>
+          <a class="button button-secondary" href="/admin">${escapeHtml(t(lang, "nav_admin"))}</a>
         </div>
       </section>
     `
@@ -1000,6 +1407,8 @@ function applySecurityHeaders(_req, res, next) {
 }
 
 function requireAdminAccess(req, res, next) {
+  const lang = getRequestLanguage(req);
+
   if (req.path === "/login" || req.path === "/logout") {
     next();
     return;
@@ -1011,7 +1420,7 @@ function requireAdminAccess(req, res, next) {
       return;
     }
 
-    res.status(503).send(renderAdminConfigPage());
+    res.status(503).send(renderAdminConfigPage(req));
     return;
   }
 
@@ -1027,9 +1436,11 @@ function requireAdminAccess(req, res, next) {
 
   res.status(401).send(
     renderLayout({
-      title: "تسجيل دخول الإدارة",
+      req,
+      title: t(lang, "admin_login_title"),
       content: renderAdminLoginPage({
-        errorMessage: "يجب تسجيل الدخول أولاً.",
+        req,
+        errorMessage: t(lang, "login_required"),
         nextPath: safeNextPath(req.originalUrl)
       })
     })
@@ -1171,15 +1582,17 @@ function safeNextPath(value) {
   return text;
 }
 
-function renderAdminLoginPage({ errorMessage = "", nextPath = "/admin" }) {
+function renderAdminLoginPage({ req, errorMessage = "", nextPath = "/admin" }) {
+  const lang = getRequestLanguage(req);
+
   return `
     <section class="section-head">
       <div>
-        <span class="hero-kicker">حماية لوحة الإدارة</span>
-        <h1 class="page-title">تسجيل دخول الإدارة</h1>
-        <p class="muted">البيانات الطبية والمحتوى الإداري يجب أن يكونا محميين قبل النشر على الإنترنت.</p>
+        <span class="hero-kicker">${escapeHtml(t(lang, "login_kicker"))}</span>
+        <h1 class="page-title">${escapeHtml(t(lang, "login_heading"))}</h1>
+        <p class="muted">${escapeHtml(t(lang, "login_description"))}</p>
       </div>
-      <a class="button button-secondary" href="/">العودة للرئيسية</a>
+      <a class="button button-secondary" href="/">${escapeHtml(t(lang, "back_home"))}</a>
     </section>
 
     ${errorMessage ? renderAlert("error", errorMessage) : ""}
@@ -1189,52 +1602,55 @@ function renderAdminLoginPage({ errorMessage = "", nextPath = "/admin" }) {
         <input type="hidden" name="next" value="${escapeAttribute(nextPath)}" />
         <div class="form-grid">
           <div class="field">
-            <label for="username">اسم المستخدم</label>
+            <label for="username">${escapeHtml(t(lang, "username_label"))}</label>
             <input id="username" name="username" type="text" required value="${escapeAttribute(ADMIN_USERNAME)}" />
           </div>
           <div class="field">
-            <label for="password">كلمة المرور</label>
-            <input id="password" name="password" type="password" required placeholder="اكتب كلمة المرور" />
+            <label for="password">${escapeHtml(t(lang, "password_label"))}</label>
+            <input id="password" name="password" type="password" required placeholder="${escapeAttribute(t(lang, "password_placeholder"))}" />
           </div>
         </div>
         <div class="button-row">
-          <button type="submit">دخول</button>
-          <a class="button button-secondary" href="/">إلغاء</a>
+          <button type="submit">${escapeHtml(t(lang, "login_button"))}</button>
+          <a class="button button-secondary" href="/">${escapeHtml(t(lang, "cancel"))}</a>
         </div>
       </form>
     </section>
   `;
 }
 
-function renderAdminConfigPage() {
+function renderAdminConfigPage(req) {
+  const lang = getRequestLanguage(req);
+
   return renderLayout({
-    title: "إعداد الإدارة",
+    req,
+    title: t(lang, "admin_config_title"),
     content: `
       <section class="empty-state">
-        <h1 class="page-title">لوحة الإدارة غير جاهزة</h1>
-        <p class="muted">قبل تشغيل المشروع أونلاين، عيّن متغير البيئة <code>ADMIN_PASSWORD</code> لحماية صفحة الإدارة.</p>
+        <h1 class="page-title">${escapeHtml(t(lang, "admin_config_heading"))}</h1>
+        <p class="muted">${escapeHtml(t(lang, "admin_config_prefix"))} <code>ADMIN_PASSWORD</code> ${escapeHtml(t(lang, "admin_config_suffix"))}</p>
         <div class="button-row">
-          <a class="button button-primary" href="/">العودة للرئيسية</a>
+          <a class="button button-primary" href="/">${escapeHtml(t(lang, "back_home"))}</a>
         </div>
       </section>
     `
   });
 }
 
-function renderAdminSessionActions() {
+function renderAdminSessionActions(req) {
   if (!ADMIN_PASSWORD) {
     return "";
   }
 
-  return `<a class="button button-secondary" href="/admin/logout">تسجيل الخروج</a>`;
+  return `<a class="button button-secondary" href="/admin/logout">${escapeHtml(t(getRequestLanguage(req), "logout"))}</a>`;
 }
 
-function renderLocalAdminWarning() {
+function renderLocalAdminWarning(req) {
   if (IS_PRODUCTION || ADMIN_PASSWORD) {
     return "";
   }
 
-  return renderAlert("error", "لوحة الإدارة مفتوحة محليًا فقط لأن ADMIN_PASSWORD غير مضبوط. قبل النشر أونلاين يجب تعيين كلمة مرور.");
+  return renderAlert("error", t(getRequestLanguage(req), "local_admin_warning"));
 }
 
 function resolveStorageRoot(storageRoot) {
@@ -1308,9 +1724,9 @@ function detectLanBaseUrl(port) {
   return "";
 }
 
-function mapErrorToMessage(error) {
+function mapErrorToMessage(error, lang = DEFAULT_LANGUAGE) {
   if (!error) {
-    return "حدث خطأ غير متوقع.";
+    return t(lang, "unexpected_error_generic");
   }
 
   const message = String(error.message || error);
@@ -1321,15 +1737,15 @@ function mapErrorToMessage(error) {
     lowerMessage.includes("duplicate key value") ||
     lowerMessage.includes("people_public_code_key")
   ) {
-    return "كود البطاقة مستخدم بالفعل. اختر كودًا مختلفًا.";
+    return t(lang, "duplicate_card_code");
   }
 
   if (lowerMessage.includes("file too large") || lowerMessage.includes("request entity too large")) {
-    return `حجم الملف الصوتي كبير. الحد الأقصى الحالي هو ${MAX_AUDIO_FILE_SIZE_MB}MB.`;
+    return t(lang, "audio_file_too_large", { size: MAX_AUDIO_FILE_SIZE_MB });
   }
 
   if (lowerMessage.includes("people table is not ready")) {
-    return "ربط Supabase موجود لكن قاعدة البيانات لم تُجهز بعد. شغّل ملف schema أولًا ثم أعد المحاولة.";
+    return t(lang, "supabase_schema_missing");
   }
 
   return message;
