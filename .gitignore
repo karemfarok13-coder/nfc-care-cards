@@ -1,6 +1,7 @@
 node_modules/
 .env
 cookies.txt
+.vercel/
 data/*
 !data/.gitkeep
 uploads/*

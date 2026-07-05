@@ -1,17 +1,33 @@
 const express = require("express");
 const multer = require("multer");
-const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { randomUUID, createHmac, timingSafeEqual } = require("node:crypto");
-const { DatabaseSync } = require("node:sqlite");
+const {
+  STORAGE_ROOT,
+  UPLOADS_DIRECTORY,
+  createPerson,
+  deletePerson,
+  deleteStoredAudio,
+  findPersonByCode,
+  findPersonById,
+  getPersistenceMode,
+  listPeople,
+  saveAudioFile,
+  updatePerson
+} = require("./persistence");
 
 const ROOT_DIR = __dirname;
 const PORT = Number(process.env.PORT || 3000);
 const HOST = normalizeHost(process.env.HOST || "0.0.0.0");
-const CONFIGURED_PUBLIC_BASE_URL = normalizeBaseUrl(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL);
+const CONFIGURED_PUBLIC_BASE_URL = normalizeBaseUrl(
+  process.env.PUBLIC_BASE_URL ||
+    toHttpsUrl(process.env.VERCEL_PROJECT_PRODUCTION_URL) ||
+    toHttpsUrl(process.env.VERCEL_BRANCH_URL) ||
+    toHttpsUrl(process.env.VERCEL_URL) ||
+    process.env.RENDER_EXTERNAL_URL
+);
 const DETECTED_LAN_BASE_URL = detectLanBaseUrl(PORT);
-const STORAGE_ROOT = resolveStorageRoot(process.env.APP_STORAGE_ROOT);
 const DEMO_PUBLIC_CODE = "demo-card";
 const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".ogg", ".aac", ".webm"]);
 const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -20,44 +36,12 @@ const ADMIN_PASSWORD = normalizeText(process.env.ADMIN_PASSWORD);
 const ADMIN_COOKIE_SECRET = normalizeText(process.env.ADMIN_COOKIE_SECRET || randomUUID());
 const ADMIN_SESSION_COOKIE = "nfc_admin_session";
 const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const IS_PRODUCTION = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER);
-const DATA_DIRECTORY = path.join(STORAGE_ROOT, "data");
-const UPLOADS_DIRECTORY = path.join(STORAGE_ROOT, "uploads");
-const DATABASE_PATH = path.join(DATA_DIRECTORY, "nfc-care.sqlite");
-
-ensureDirectory(DATA_DIRECTORY);
-ensureDirectory(UPLOADS_DIRECTORY);
-
-const db = new DatabaseSync(DATABASE_PATH);
-db.exec(`
-  PRAGMA journal_mode = WAL;
-
-  CREATE TABLE IF NOT EXISTS people (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    public_code TEXT NOT NULL UNIQUE,
-    full_name TEXT NOT NULL,
-    address TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    emergency_phone TEXT,
-    diagnosis_summary TEXT,
-    audio_path TEXT,
-    notes TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-`);
-
-seedDemoRecord();
+const IS_PRODUCTION = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER) || Boolean(process.env.VERCEL);
+const IS_VERCEL = Boolean(process.env.VERCEL);
+const MAX_AUDIO_FILE_SIZE_MB = Number(process.env.MAX_AUDIO_FILE_SIZE_MB || (IS_VERCEL ? 4 : 15));
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, callback) => callback(null, UPLOADS_DIRECTORY),
-    filename: (_req, file, callback) => {
-      const extension = path.extname(file.originalname || "").toLowerCase();
-      const safeExtension = AUDIO_EXTENSIONS.has(extension) ? extension : ".bin";
-      callback(null, `${Date.now()}-${randomUUID()}${safeExtension}`);
-    }
-  }),
+  storage: multer.memoryStorage(),
   fileFilter: (_req, file, callback) => {
     const extension = path.extname(file.originalname || "").toLowerCase();
     const isAudio = file.mimetype.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension);
@@ -70,7 +54,7 @@ const upload = multer({
     callback(new Error("يرجى رفع ملف صوتي صالح مثل MP3 أو WAV."));
   },
   limits: {
-    fileSize: 15 * 1024 * 1024
+    fileSize: MAX_AUDIO_FILE_SIZE_MB * 1024 * 1024
   }
 });
 
@@ -151,8 +135,8 @@ app.get("/admin/logout", (req, res) => {
   res.redirect("/admin/login");
 });
 
-app.get("/", (req, res) => {
-  const people = listPeople();
+app.get("/", async (req, res) => {
+  const people = await listPeople();
 
   res.send(
     renderLayout({
@@ -226,8 +210,8 @@ app.get("/", (req, res) => {
   );
 });
 
-app.get("/admin", (req, res) => {
-  const people = listPeople();
+app.get("/admin", async (req, res) => {
+  const people = await listPeople();
   const success = normalizeText(req.query.success);
 
   res.send(
@@ -300,6 +284,8 @@ app.get("/admin/new", (req, res) => {
 });
 
 app.post("/admin/people", async (req, res) => {
+  let uploadedAudioPath = "";
+
   try {
     await runUploader(req, res);
 
@@ -307,7 +293,6 @@ app.post("/admin/people", async (req, res) => {
     const validationError = validatePersonInput(input);
 
     if (validationError) {
-      cleanupUploadedFile(req.file);
       res.status(400).send(
         renderLayout({
           title: "إضافة بطاقة جديدة",
@@ -327,37 +312,26 @@ app.post("/admin/people", async (req, res) => {
 
     const publicCode = input.publicCode || generatePublicCode();
     const timestamp = new Date().toISOString();
-    const audioPath = req.file ? `/uploads/${req.file.filename}` : null;
+    uploadedAudioPath = req.file ? await saveAudioFile(req.file) : "";
 
-    db.prepare(`
-      INSERT INTO people (
-        public_code,
-        full_name,
-        address,
-        phone,
-        emergency_phone,
-        diagnosis_summary,
-        audio_path,
-        notes,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      publicCode,
-      input.fullName,
-      input.address,
-      input.phone,
-      input.emergencyPhone,
-      input.diagnosisSummary,
-      audioPath,
-      input.notes,
-      timestamp,
-      timestamp
-    );
+    await createPerson({
+      public_code: publicCode,
+      full_name: input.fullName,
+      address: input.address,
+      phone: input.phone,
+      emergency_phone: input.emergencyPhone || null,
+      diagnosis_summary: input.diagnosisSummary || null,
+      audio_path: uploadedAudioPath || null,
+      notes: input.notes || null,
+      created_at: timestamp,
+      updated_at: timestamp
+    });
 
     res.redirect(`/admin?success=${encodeURIComponent("تم إنشاء البطاقة بنجاح.")}`);
   } catch (error) {
-    cleanupUploadedFile(req.file);
+    if (uploadedAudioPath) {
+      await deleteStoredAudio(uploadedAudioPath);
+    }
 
     const message = mapErrorToMessage(error);
     res.status(400).send(
@@ -377,8 +351,8 @@ app.post("/admin/people", async (req, res) => {
   }
 });
 
-app.get("/admin/people/:id/edit", (req, res) => {
-  const person = findPersonById(req.params.id);
+app.get("/admin/people/:id/edit", async (req, res) => {
+  const person = await findPersonById(req.params.id);
 
   if (!person) {
     res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
@@ -401,10 +375,10 @@ app.get("/admin/people/:id/edit", (req, res) => {
 });
 
 app.post("/admin/people/:id", async (req, res) => {
-  const current = findPersonById(req.params.id);
+  const current = await findPersonById(req.params.id);
+  let uploadedAudioPath = "";
 
   if (!current) {
-    cleanupUploadedFile(req.file);
     res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
     return;
   }
@@ -416,7 +390,6 @@ app.post("/admin/people/:id", async (req, res) => {
     const validationError = validatePersonInput(input);
 
     if (validationError) {
-      cleanupUploadedFile(req.file);
       res.status(400).send(
         renderLayout({
           title: `تعديل بطاقة ${escapeHtml(current.full_name)}`,
@@ -438,49 +411,39 @@ app.post("/admin/people/:id", async (req, res) => {
     let audioPath = current.audio_path;
 
     if (req.file) {
-      audioPath = `/uploads/${req.file.filename}`;
+      uploadedAudioPath = await saveAudioFile(req.file);
+      audioPath = uploadedAudioPath;
     } else if (shouldRemoveAudio) {
       audioPath = null;
     }
 
     const nextPublicCode = input.publicCode || current.public_code || generatePublicCode();
 
-    db.prepare(`
-      UPDATE people
-      SET public_code = ?,
-          full_name = ?,
-          address = ?,
-          phone = ?,
-          emergency_phone = ?,
-          diagnosis_summary = ?,
-          audio_path = ?,
-          notes = ?,
-          updated_at = ?
-      WHERE id = ?
-    `).run(
-      nextPublicCode,
-      input.fullName,
-      input.address,
-      input.phone,
-      input.emergencyPhone,
-      input.diagnosisSummary,
-      audioPath,
-      input.notes,
-      new Date().toISOString(),
-      current.id
-    );
+    await updatePerson(current.id, {
+      public_code: nextPublicCode,
+      full_name: input.fullName,
+      address: input.address,
+      phone: input.phone,
+      emergency_phone: input.emergencyPhone || null,
+      diagnosis_summary: input.diagnosisSummary || null,
+      audio_path: audioPath,
+      notes: input.notes || null,
+      updated_at: new Date().toISOString()
+    });
 
     if (req.file && current.audio_path) {
-      deleteStoredAudio(current.audio_path);
+      await deleteStoredAudio(current.audio_path);
     }
 
     if (shouldRemoveAudio && current.audio_path && !req.file) {
-      deleteStoredAudio(current.audio_path);
+      await deleteStoredAudio(current.audio_path);
     }
 
     res.redirect(`/admin?success=${encodeURIComponent("تم تحديث البطاقة بنجاح.")}`);
   } catch (error) {
-    cleanupUploadedFile(req.file);
+    if (uploadedAudioPath) {
+      await deleteStoredAudio(uploadedAudioPath);
+    }
 
     const message = mapErrorToMessage(error);
     res.status(400).send(
@@ -500,25 +463,25 @@ app.post("/admin/people/:id", async (req, res) => {
   }
 });
 
-app.post("/admin/people/:id/delete", (req, res) => {
-  const person = findPersonById(req.params.id);
+app.post("/admin/people/:id/delete", async (req, res) => {
+  const person = await findPersonById(req.params.id);
 
   if (!person) {
     res.status(404).send(renderNotFoundPage("البطاقة المطلوبة غير موجودة."));
     return;
   }
 
-  db.prepare("DELETE FROM people WHERE id = ?").run(person.id);
+  await deletePerson(person.id);
 
   if (person.audio_path) {
-    deleteStoredAudio(person.audio_path);
+    await deleteStoredAudio(person.audio_path);
   }
 
   res.redirect(`/admin?success=${encodeURIComponent("تم حذف البطاقة بنجاح.")}`);
 });
 
-app.get("/p/:publicCode", (req, res) => {
-  const person = findPersonByCode(req.params.publicCode);
+app.get("/p/:publicCode", async (req, res) => {
+  const person = await findPersonByCode(req.params.publicCode);
 
   if (!person) {
     res.status(404).send(renderNotFoundPage("الرابط غير صحيح أو البطاقة لم تعد متاحة."));
@@ -534,7 +497,7 @@ app.get("/p/:publicCode", (req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, persistence: getPersistenceMode() });
 });
 
 app.use((_req, res) => {
@@ -546,15 +509,16 @@ app.use((error, _req, res, _next) => {
   res.status(500).send(renderNotFoundPage("حدث خطأ غير متوقع. جرّب مرة أخرى بعد قليل."));
 });
 
-app.listen(PORT, () => {
-  console.log(`NFC care app is running on http://${HOST}:${PORT}`);
-  console.log(`Admin dashboard: http://${HOST}:${PORT}/admin`);
-  console.log(`Storage root: ${STORAGE_ROOT}`);
-});
-
-function ensureDirectory(directoryPath) {
-  fs.mkdirSync(directoryPath, { recursive: true });
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`NFC care app is running on http://${HOST}:${PORT}`);
+    console.log(`Admin dashboard: http://${HOST}:${PORT}/admin`);
+    console.log(`Storage root: ${STORAGE_ROOT}`);
+    console.log(`Persistence mode: ${getPersistenceMode()}`);
+  });
 }
+
+module.exports = app;
 
 function runUploader(req, res) {
   return new Promise((resolve, reject) => {
@@ -636,18 +600,6 @@ function generatePublicCode() {
   return `card-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
 }
 
-function listPeople() {
-  return db.prepare("SELECT * FROM people ORDER BY created_at DESC").all();
-}
-
-function findPersonById(id) {
-  return db.prepare("SELECT * FROM people WHERE id = ?").get(Number(id));
-}
-
-function findPersonByCode(publicCode) {
-  return db.prepare("SELECT * FROM people WHERE public_code = ?").get(String(publicCode));
-}
-
 function seedDemoRecord() {
   const existing = findPersonByCode(DEMO_PUBLIC_CODE);
 
@@ -698,7 +650,7 @@ function cleanupUploadedFile(file) {
   }
 }
 
-function deleteStoredAudio(audioPath) {
+function deleteStoredAudioLocal(audioPath) {
   const filePath = path.join(UPLOADS_DIRECTORY, path.basename(audioPath));
 
   try {
@@ -1043,7 +995,7 @@ function applySecurityHeaders(_req, res, next) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
-  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; media-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; media-src 'self' https: data: blob:; img-src 'self' data:; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'");
   next();
 }
 
@@ -1317,6 +1269,20 @@ function normalizeBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
 }
 
+function toHttpsUrl(value) {
+  const normalized = normalizeText(value);
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
+    return normalized;
+  }
+
+  return `https://${normalized}`;
+}
+
 function isLocalOnlyBaseUrl(baseUrl) {
   try {
     const parsedUrl = new URL(baseUrl);
@@ -1348,9 +1314,22 @@ function mapErrorToMessage(error) {
   }
 
   const message = String(error.message || error);
+  const lowerMessage = message.toLowerCase();
 
-  if (message.includes("UNIQUE constraint failed")) {
+  if (
+    message.includes("UNIQUE constraint failed") ||
+    lowerMessage.includes("duplicate key value") ||
+    lowerMessage.includes("people_public_code_key")
+  ) {
     return "كود البطاقة مستخدم بالفعل. اختر كودًا مختلفًا.";
+  }
+
+  if (lowerMessage.includes("file too large") || lowerMessage.includes("request entity too large")) {
+    return `حجم الملف الصوتي كبير. الحد الأقصى الحالي هو ${MAX_AUDIO_FILE_SIZE_MB}MB.`;
+  }
+
+  if (lowerMessage.includes("people table is not ready")) {
+    return "ربط Supabase موجود لكن قاعدة البيانات لم تُجهز بعد. شغّل ملف schema أولًا ثم أعد المحاولة.";
   }
 
   return message;
