@@ -516,6 +516,12 @@ input[type="checkbox"] {
   border: 1px solid rgba(14, 124, 123, 0.16);
 }
 
+.audio-autoplay-note {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
 audio {
   width: 100%;
   margin-top: 12px;

@@ -703,6 +703,9 @@ const TRANSLATIONS = {
     audio_heading: "Voice Recording",
     audio_description: "You can play the recording for a clearer explanation of the case or diagnosis.",
     no_audio_yet: "No voice recording has been uploaded for this card yet.",
+    autoplay_retry_note: "The page will try to play the voice recording automatically when it opens.",
+    autoplay_blocked_note: "If audio does not start automatically, tap the button below or touch the page once.",
+    play_recording: "Play Recording",
     not_found_title: "Not Found",
     not_found_heading: "Not Found",
     login_kicker: "Dashboard Protection",
@@ -842,6 +845,9 @@ const TRANSLATIONS = {
     audio_heading: "التسجيل الصوتي",
     audio_description: "يمكن تشغيل التسجيل لشرح الحالة أو التشخيص بشكل أوضح.",
     no_audio_yet: "لا يوجد تسجيل صوتي مرفوع لهذه البطاقة حتى الآن.",
+    autoplay_retry_note: "سيحاول الموقع تشغيل التسجيل الصوتي تلقائيًا بمجرد فتح الصفحة.",
+    autoplay_blocked_note: "إذا لم يبدأ الصوت تلقائيًا، اضغط الزر التالي أو المس الصفحة مرة واحدة.",
+    play_recording: "تشغيل التسجيل",
     not_found_title: "غير موجود",
     not_found_heading: "غير موجود",
     login_kicker: "حماية لوحة الإدارة",
@@ -1355,13 +1361,105 @@ function renderPublicProfile(person, req) {
             ? `
               <div class="audio-box">
                 <div>${escapeHtml(t(lang, "audio_description"))}</div>
-                <audio controls src="${escapeAttribute(person.audio_path)}"></audio>
+                <p class="helper">${escapeHtml(t(lang, "autoplay_retry_note"))}</p>
+                <audio
+                  controls
+                  autoplay
+                  playsinline
+                  preload="auto"
+                  data-public-audio
+                  src="${escapeAttribute(person.audio_path)}"
+                ></audio>
+                <div class="audio-autoplay-note" data-audio-fallback hidden>
+                  <p class="helper">${escapeHtml(t(lang, "autoplay_blocked_note"))}</p>
+                  <button class="button button-secondary" type="button" data-audio-play>
+                    ${escapeHtml(t(lang, "play_recording"))}
+                  </button>
+                </div>
               </div>
             `
             : `<p class="muted">${escapeHtml(t(lang, "no_audio_yet"))}</p>`
         }
       </article>
     </section>
+
+    <script>
+      (function () {
+        const audio = document.querySelector("[data-public-audio]");
+        const fallback = document.querySelector("[data-audio-fallback]");
+        const playButton = document.querySelector("[data-audio-play]");
+
+        if (!audio) {
+          return;
+        }
+
+        let hasStarted = false;
+
+        const showFallback = () => {
+          if (fallback) {
+            fallback.hidden = false;
+          }
+        };
+
+        const hideFallback = () => {
+          if (fallback) {
+            fallback.hidden = true;
+          }
+        };
+
+        const detachRetryListeners = () => {
+          document.removeEventListener("touchstart", retryOnInteraction, retryOptions);
+          document.removeEventListener("click", retryOnInteraction, retryOptions);
+          document.removeEventListener("visibilitychange", retryOnVisibility);
+        };
+
+        const tryPlay = async () => {
+          if (hasStarted) {
+            return true;
+          }
+
+          try {
+            audio.muted = false;
+            await audio.play();
+            hasStarted = true;
+            hideFallback();
+            detachRetryListeners();
+            return true;
+          } catch (_error) {
+            showFallback();
+            return false;
+          }
+        };
+
+        const retryOptions = { passive: true };
+        const retryOnInteraction = () => {
+          tryPlay();
+        };
+        const retryOnVisibility = () => {
+          if (document.visibilityState === "visible") {
+            tryPlay();
+          }
+        };
+
+        if (playButton) {
+          playButton.addEventListener("click", tryPlay);
+        }
+
+        audio.addEventListener("play", () => {
+          hasStarted = true;
+          hideFallback();
+          detachRetryListeners();
+        });
+
+        audio.addEventListener("loadeddata", tryPlay, { once: true });
+        window.addEventListener("load", tryPlay, { once: true });
+        document.addEventListener("touchstart", retryOnInteraction, retryOptions);
+        document.addEventListener("click", retryOnInteraction, retryOptions);
+        document.addEventListener("visibilitychange", retryOnVisibility);
+
+        tryPlay();
+      })();
+    </script>
   `;
 }
 
