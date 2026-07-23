@@ -12,6 +12,7 @@ const {
   findPersonByCode,
   findPersonById,
   getPersistenceMode,
+  getPersistenceStatus,
   listPeople,
   saveAudioFile,
   updatePerson
@@ -150,8 +151,8 @@ app.get("/admin/logout", (req, res) => {
 });
 
 app.get("/", async (req, res) => {
-  const people = await listPeople();
   const lang = getRequestLanguage(req);
+  const { people, warningMessage } = await loadPeopleForLanding(req);
 
   res.send(
     renderLayout({
@@ -207,6 +208,7 @@ app.get("/", async (req, res) => {
             <h2>${escapeHtml(t(lang, "existing_cards_title"))}</h2>
             <a class="button button-secondary" href="/admin/new">${escapeHtml(t(lang, "add_new_card"))}</a>
           </div>
+          ${warningMessage ? renderAlert("warning", warningMessage) : ""}
           ${
             people.length
               ? `<div class="grid">${people
@@ -224,9 +226,9 @@ app.get("/", async (req, res) => {
 });
 
 app.get("/admin", async (req, res) => {
-  const people = await listPeople();
   const lang = getRequestLanguage(req);
   const success = resolveFlashMessage(req, req.query.success);
+  const { people, warningMessage } = await loadPeopleForDashboard(req);
 
   res.send(
     renderLayout({
@@ -247,6 +249,7 @@ app.get("/admin", async (req, res) => {
         </section>
 
         ${renderLocalAdminWarning(req)}
+        ${warningMessage ? renderAlert("warning", warningMessage) : ""}
         ${success ? renderAlert("success", success) : ""}
 
         <section class="table-card">
@@ -376,8 +379,16 @@ app.post("/admin/people", async (req, res) => {
 });
 
 app.get("/admin/people/:id/edit", async (req, res) => {
-  const person = await findPersonById(req.params.id);
   const lang = getRequestLanguage(req);
+  let person;
+
+  try {
+    person = await findPersonById(req.params.id);
+  } catch (error) {
+    console.error(error);
+    res.status(503).send(renderNotFoundPage(req, t(lang, "persistence_service_unavailable")));
+    return;
+  }
 
   if (!person) {
     res.status(404).send(renderNotFoundPage(req, t(lang, "card_not_found")));
@@ -496,8 +507,16 @@ app.post("/admin/people/:id", async (req, res) => {
 });
 
 app.post("/admin/people/:id/delete", async (req, res) => {
-  const person = await findPersonById(req.params.id);
   const lang = getRequestLanguage(req);
+  let person;
+
+  try {
+    person = await findPersonById(req.params.id);
+  } catch (error) {
+    console.error(error);
+    res.status(503).send(renderNotFoundPage(req, t(lang, "persistence_service_unavailable")));
+    return;
+  }
 
   if (!person) {
     res.status(404).send(renderNotFoundPage(req, t(lang, "card_not_found")));
@@ -514,8 +533,26 @@ app.post("/admin/people/:id/delete", async (req, res) => {
 });
 
 app.get("/p/:publicCode", async (req, res) => {
-  const person = await findPersonByCode(req.params.publicCode);
   const lang = getRequestLanguage(req);
+  const normalizedCode = normalizeCode(req.params.publicCode) || String(req.params.publicCode || "");
+  let person;
+  let warningMessage = "";
+
+  try {
+    person = await findPersonByCode(req.params.publicCode);
+    if (!getPersistenceStatus().ready) {
+      warningMessage = t(lang, "persistence_public_warning");
+    }
+  } catch (error) {
+    console.error(error);
+    if (normalizedCode === DEMO_PUBLIC_CODE) {
+      warningMessage = t(lang, "persistence_public_warning");
+      person = await findPersonByCode(DEMO_PUBLIC_CODE);
+    } else {
+      res.status(503).send(renderNotFoundPage(req, t(lang, "persistence_service_unavailable")));
+      return;
+    }
+  }
 
   if (!person) {
     res.status(404).send(renderNotFoundPage(req, t(lang, "invalid_public_link")));
@@ -526,13 +563,19 @@ app.get("/p/:publicCode", async (req, res) => {
     renderLayout({
       req,
       title: person.full_name,
-      content: renderPublicProfile(person, req)
+      content: `${warningMessage ? renderAlert("warning", warningMessage) : ""}${renderPublicProfile(person, req)}`
     })
   );
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, persistence: getPersistenceMode() });
+  const status = getPersistenceStatus();
+  res.status(status.ready ? 200 : 503).json({
+    ok: status.ready,
+    persistence: getPersistenceMode(),
+    stage: status.stage,
+    error: status.error
+  });
 });
 
 app.use((req, res) => {
@@ -618,6 +661,12 @@ const TRANSLATIONS = {
       "The card stores only a short link. When tapped with a phone, it opens a page with the name, address, contact numbers, a case summary, and a voice recording for diagnosis or key instructions.",
     open_dashboard: "Open Dashboard",
     view_demo_card: "View Demo Card",
+    persistence_warning:
+      "The database connection is temporarily unavailable. The page is showing limited content until Supabase is reachable again.",
+    persistence_public_warning:
+      "The live database is currently unavailable. This public page may be temporarily limited.",
+    persistence_write_warning:
+      "The live database connection is currently unavailable, so dashboard changes may not save until Supabase is reconnected.",
     cards_registered_count: "cards registered right now",
     one_link_value: "1 link",
     one_link_label: "written to the card instead of storing all details",
@@ -722,6 +771,8 @@ const TRANSLATIONS = {
     logout: "Log Out",
     local_admin_warning:
       "The dashboard is open locally only because ADMIN_PASSWORD is not set. Set a password before publishing online.",
+    persistence_service_unavailable:
+      "The live database service is currently unavailable. Please check the Supabase connection settings and try again.",
     login_invalid: "Invalid login credentials.",
     login_required: "You need to log in first.",
     card_created_success: "Card created successfully.",
@@ -760,6 +811,12 @@ const TRANSLATIONS = {
       "الكارت يحمل رابط قصير فقط، وعند لمسه بالموبايل تفتح صفحة فيها الاسم، العنوان، أرقام التواصل، وصف الحالة، وتسجيل صوتي يشرح التشخيص أو التعليمات المهمة.",
     open_dashboard: "فتح لوحة الإدارة",
     view_demo_card: "عرض بطاقة تجريبية",
+    persistence_warning:
+      "اتصال قاعدة البيانات غير متاح مؤقتًا. الصفحة تعرض محتوى محدودًا إلى أن يعود اتصال Supabase للعمل.",
+    persistence_public_warning:
+      "قاعدة البيانات المباشرة غير متاحة حاليًا، لذلك قد تكون هذه الصفحة العامة محدودة مؤقتًا.",
+    persistence_write_warning:
+      "اتصال قاعدة البيانات المباشرة غير متاح حاليًا، لذلك قد لا يتم حفظ التعديلات من لوحة الإدارة حتى يعود Supabase للعمل.",
     cards_registered_count: "بطاقات مسجلة حاليًا",
     one_link_value: "1 رابط",
     one_link_label: "يُكتب على الكارت بدل تخزين كل البيانات",
@@ -864,6 +921,8 @@ const TRANSLATIONS = {
     logout: "تسجيل الخروج",
     local_admin_warning:
       "لوحة الإدارة مفتوحة محليًا فقط لأن ADMIN_PASSWORD غير مضبوط. قبل النشر أونلاين يجب تعيين كلمة مرور.",
+    persistence_service_unavailable:
+      "خدمة قاعدة البيانات المباشرة غير متاحة حاليًا. راجع إعدادات اتصال Supabase ثم حاول مرة أخرى.",
     login_invalid: "بيانات الدخول غير صحيحة.",
     login_required: "يجب تسجيل الدخول أولاً.",
     card_created_success: "تم إنشاء البطاقة بنجاح.",
@@ -1464,8 +1523,41 @@ function renderPublicProfile(person, req) {
 }
 
 function renderAlert(type, message) {
-  const className = type === "success" ? "alert-success" : "alert-error";
+  const className =
+    type === "success" ? "alert-success" : type === "warning" ? "alert-warning" : "alert-error";
   return `<div class="alert ${className}">${escapeHtml(message)}</div>`;
+}
+
+async function loadPeopleForLanding(req) {
+  const lang = getRequestLanguage(req);
+
+  try {
+    const people = await listPeople();
+    const warningMessage = getPersistenceStatus().ready ? "" : t(lang, "persistence_warning");
+    return { people, warningMessage };
+  } catch (error) {
+    console.error(error);
+    return {
+      people: [],
+      warningMessage: t(lang, "persistence_warning")
+    };
+  }
+}
+
+async function loadPeopleForDashboard(req) {
+  const lang = getRequestLanguage(req);
+
+  try {
+    const people = await listPeople();
+    const warningMessage = getPersistenceStatus().ready ? "" : t(lang, "persistence_write_warning");
+    return { people, warningMessage };
+  } catch (error) {
+    console.error(error);
+    return {
+      people: [],
+      warningMessage: t(lang, "persistence_write_warning")
+    };
+  }
 }
 
 function renderNotFoundPage(req, message) {
@@ -1844,6 +1936,15 @@ function mapErrorToMessage(error, lang = DEFAULT_LANGUAGE) {
 
   if (lowerMessage.includes("people table is not ready")) {
     return t(lang, "supabase_schema_missing");
+  }
+
+  if (
+    lowerMessage.includes("fetch failed") ||
+    lowerMessage.includes("enotfound") ||
+    lowerMessage.includes("getaddrinfo") ||
+    lowerMessage.includes("network")
+  ) {
+    return t(lang, "persistence_service_unavailable");
   }
 
   return message;

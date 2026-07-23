@@ -445,6 +445,11 @@ input[type="checkbox"] {
   color: #145c36;
 }
 
+.alert-warning {
+  background: rgba(242, 143, 59, 0.16);
+  color: #8b4d12;
+}
+
 .alert-error {
   background: rgba(187, 62, 62, 0.12);
   color: #7b2323;

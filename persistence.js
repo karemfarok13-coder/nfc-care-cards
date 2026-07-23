@@ -18,8 +18,19 @@ const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 
 let db = null;
 let supabase = null;
+let initializationError = null;
+let initializationStage = "starting";
 
-const readyPromise = initialize();
+const readyPromise = initialize().catch((error) => {
+  initializationError = error;
+  initializationStage = "error";
+
+  if (!USE_SUPABASE) {
+    throw error;
+  }
+
+  console.error("[persistence] Supabase initialization failed:", error.message || error);
+});
 
 module.exports = {
   DATA_DIRECTORY,
@@ -33,6 +44,7 @@ module.exports = {
   findPersonByCode,
   findPersonById,
   getPersistenceMode,
+  getPersistenceStatus,
   listPeople,
   saveAudioFile,
   updatePerson
@@ -40,6 +52,7 @@ module.exports = {
 
 async function initialize() {
   if (USE_SUPABASE) {
+    initializationStage = "connecting";
     supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: {
         persistSession: false
@@ -47,10 +60,20 @@ async function initialize() {
     });
 
     await verifySupabaseAccess();
-    await seedDemoRecordRemote();
+    initializationStage = "seeding";
+
+    try {
+      await seedDemoRecordRemote();
+    } catch (error) {
+      console.error("[persistence] Unable to seed remote demo card:", error.message || error);
+    }
+
+    initializationError = null;
+    initializationStage = "ready";
     return;
   }
 
+  initializationStage = "local";
   ensureDirectory(DATA_DIRECTORY);
   ensureDirectory(UPLOADS_DIRECTORY);
 
@@ -74,6 +97,8 @@ async function initialize() {
   `);
 
   seedDemoRecordLocal();
+  initializationError = null;
+  initializationStage = "ready";
 }
 
 async function verifySupabaseAccess() {
@@ -94,6 +119,7 @@ async function listPeople() {
       throw new Error(`Unable to load people: ${error.message}`);
     }
 
+    initializationError = null;
     return data || [];
   }
 
@@ -110,6 +136,7 @@ async function findPersonById(id) {
       throw new Error(`Unable to load card: ${error.message}`);
     }
 
+    initializationError = null;
     return data?.[0] || null;
   }
 
@@ -118,18 +145,24 @@ async function findPersonById(id) {
 
 async function findPersonByCode(publicCode) {
   await readyPromise;
+  const normalizedCode = String(publicCode);
 
   if (USE_SUPABASE) {
-    const { data, error } = await supabase.from("people").select("*").eq("public_code", String(publicCode)).limit(1);
+    const { data, error } = await supabase.from("people").select("*").eq("public_code", normalizedCode).limit(1);
 
     if (error) {
+      if (normalizedCode === DEMO_PUBLIC_CODE) {
+        return buildDemoRecord();
+      }
+
       throw new Error(`Unable to load public profile: ${error.message}`);
     }
 
+    initializationError = null;
     return data?.[0] || null;
   }
 
-  return db.prepare("SELECT * FROM people WHERE public_code = ?").get(String(publicCode));
+  return db.prepare("SELECT * FROM people WHERE public_code = ?").get(normalizedCode);
 }
 
 async function createPerson(person) {
@@ -142,6 +175,7 @@ async function createPerson(person) {
       throw new Error(`Unable to create card: ${error.message}`);
     }
 
+    initializationError = null;
     return data;
   }
 
@@ -184,6 +218,7 @@ async function updatePerson(id, person) {
       throw new Error(`Unable to update card: ${error.message}`);
     }
 
+    initializationError = null;
     return data;
   }
 
@@ -225,6 +260,7 @@ async function deletePerson(id) {
       throw new Error(`Unable to delete card: ${error.message}`);
     }
 
+    initializationError = null;
     return;
   }
 
@@ -252,6 +288,7 @@ async function saveAudioFile(file) {
       throw new Error(`Unable to upload audio: ${error.message}`);
     }
 
+    initializationError = null;
     const { data } = supabase.storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(fileName);
     return data.publicUrl;
   }
@@ -278,6 +315,7 @@ async function deleteStoredAudio(audioPath) {
       throw new Error(`Unable to delete audio: ${error.message}`);
     }
 
+    initializationError = null;
     return;
   }
 
@@ -286,6 +324,33 @@ async function deleteStoredAudio(audioPath) {
 
 function getPersistenceMode() {
   return USE_SUPABASE ? "supabase" : "local";
+}
+
+function getPersistenceStatus() {
+  return {
+    mode: getPersistenceMode(),
+    ready: !initializationError,
+    stage: initializationStage,
+    error: initializationError ? String(initializationError.message || initializationError) : ""
+  };
+}
+
+function buildDemoRecord() {
+  const timestamp = new Date(2026, 6, 1).toISOString();
+
+  return {
+    id: "demo-fallback",
+    public_code: DEMO_PUBLIC_CODE,
+    full_name: "حالة تجريبية",
+    address: "القاهرة - عنوان تجريبي",
+    phone: "01000000000",
+    emergency_phone: "01011111111",
+    diagnosis_summary: "هذه بطاقة تجريبية لشرح الفكرة. يمكنك استبدالها ببيانات حقيقية من لوحة الإدارة.",
+    audio_path: null,
+    notes: "يفضل إظهار البيانات العامة فقط، وترك التفاصيل الطبية الحساسة لمستخدم مصرح له.",
+    created_at: timestamp,
+    updated_at: timestamp
+  };
 }
 
 function seedDemoRecordLocal() {
